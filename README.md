@@ -50,6 +50,7 @@ allowing the cache size to be adjusted according to the system parameters and th
 - Cross-browser modern web interface
 - Optional DLNA server
 - Optional GStreamer HLS remuxing and transcoding (`-gst` builds from release 141.10)
+- Native [MCP](server/mcp/README.md) server for AI agents (OpenClaw, Hermes, and other MCP clients)
 
 ## Getting Started
 
@@ -65,10 +66,26 @@ Run `TorrServer-windows-amd64.exe`.
 
 #### Linux
 
-Run in console
+**Interactive install** (download first — preferred):
 
 ```bash
-curl -s https://raw.githubusercontent.com/YouROK/TorrServer/master/installTorrServerLinux.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/YouROK/TorrServer/master/installTorrServerLinux.sh -o installTorrServerLinux.sh && chmod 755 installTorrServerLinux.sh && sudo bash ./installTorrServerLinux.sh
+```
+
+Other interactive one-liners (avoid `curl | sudo bash`, which hangs on modern `sudo` with `use_pty`):
+
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/YouROK/TorrServer/master/installTorrServerLinux.sh)"
+```
+
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/YouROK/TorrServer/master/installTorrServerLinux.sh)
+```
+
+**Non-interactive** pipe is fine when there are no prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YouROK/TorrServer/master/installTorrServerLinux.sh | sudo bash -s -- --install --silent
 ```
 
 The script supports interactive and non-interactive installation, configuration, updates, and removal. When running the script interactively, you can:
@@ -77,12 +94,6 @@ The script supports interactive and non-interactive installation, configuration,
 - **GStreamer build**: For releases 141.10+ on amd64/arm64, choose the gst build with transcoding support (or pass `--gst`)
 - **Reconfigure**: If TorrServer is already installed, you'll be prompted to reconfigure settings (port, auth, read-only mode, logging, BBR)
 - **Uninstall**: Type `Delete` (or `Удалить` in Russian) to uninstall TorrServer
-
-**Download first and set execute permissions:**
-
-```bash
-curl -s https://raw.githubusercontent.com/YouROK/TorrServer/master/installTorrServerLinux.sh -o installTorrServerLinux.sh && chmod 755 installTorrServerLinux.sh
-```
 
 **Command-line examples:**
 
@@ -194,28 +205,28 @@ On FreeBSD (TrueNAS/FreeNAS) you can use this plugin: <https://github.com/filka9
 
 - `--port PORT`, `-p PORT` - web server port (default 8090)
 - `--ip IP`, `-i IP` - web server bind addr (repeatable; default empty binds to all interfaces)
-- `--ssl` - enables https for web server
+- `--ssl` - enables HTTPS for web server
 - `--sslport PORT` -  web server https port (default 8091). If not set, will be taken from db (if stored previously) or the default will be used.
-- `--sslcert PATH` -  path to ssl cert file. If not set, will be taken from db (if stored previously) or default self-signed certificate/key will be generated.
-- `--sslkey PATH` - path to ssl key file. If not set, will be taken from db (if stored previously) or default self-signed certificate/key will be generated.
+- `--sslcert PATH` -  path to SSL cert file. If not set, will be taken from db (if stored previously) or default self-signed certificate/key will be generated.
+- `--sslkey PATH` - path to SSL key file. If not set, will be taken from db (if stored previously) or default self-signed certificate/key will be generated.
 - `--force-https` - with `--ssl`, the HTTP listener (`--port`) answers only with **307 Temporary Redirect** to the same path on HTTPS (`--sslport`). The web UI and API are served on HTTPS only; nothing is served on HTTP except redirects. Requires `--ssl` (startup fails if `--force-https` is set without `--ssl`). Default is off so plain HTTP still works when SSL is disabled.
 - `--path PATH`, `-d PATH` - database and config dir path
 - `--logpath LOGPATH`, `-l LOGPATH` - server log file path
 - `--weblogpath WEBLOGPATH`, `-w WEBLOGPATH` - web access log file path
 - `--rdb`, `-r` - start in read-only DB mode
-- `--httpauth`, `-a` - enable http auth on all requests
+- `--httpauth`, `-a` - enable HTTP Auth on all requests
 - `--dontkill`, `-k` - don't kill server on signal
 - `--ui`, `-u` - open torrserver page in browser
 - `--torrentsdir TORRENTSDIR`, `-t TORRENTSDIR` - autoload torrents from dir
-- `--torrentaddr TORRENTADDR` - Torrent client address (format [IP]:PORT, ex. :32000, 127.0.0.1:32768 etc)
+- `--torrentaddr TORRENTADDR` - Torrent client address (format [IP]:PORT, ex. :32000, 127.0.0.1:32768 etc.)
 - `--pubipv4 PUBIPV4`, `-4 PUBIPV4` - set public IPv4 addr
 - `--pubipv6 PUBIPV6`, `-6 PUBIPV6` - set public IPv6 addr
 - `--searchwa`, `-s` - allow search without authentication
 - `--maxsize MAXSIZE`, `-m MAXSIZE` - max allowed stream size (in Bytes)
 - `--tg TGTOKEN`, `-T TGTOKEN` - [Telegram bot](server/tgbot/README.md) token
-- `--fuse FUSEPATH`, `-f FUSEPATH` - fuse mount path
-- `--webdav` - enable web dav
-- `--proxyurl PROXYURL` - set proxy URL for BitTorrent traffic (http, socks4, socks5, socks5h), example: socks5h://user:password@example.com:2080
+- `--fuse FUSEPATH`, `-f FUSEPATH` - FUSE mount path
+- `--webdav` - enable WebDAV
+- `--proxyurl PROXYURL` - set proxy URL for BitTorrent traffic (HTTP, SOCKS4, SOCKS5, SOCKS5H), example: socks5h://user:password@example.com:2080
 - `--proxymode PROXYMODE` - set proxy mode: "tracker" (only HTTP trackers, default), "peers" (only peer connections), or "full" (all traffic)
 - `--help`, `-h` - display this help and exit
 - `--version` - display version and exit
@@ -240,19 +251,37 @@ For running in persistence mode, just mount volume to container by adding `-v ~/
 docker run --rm -d --name torrserver -v ~/ts:/opt/ts -p 8090:8090 ghcr.io/yourok/torrserver:latest
 ```
 
-#### Environments
+#### Environment Variables
 
-- `TS_HTTPAUTH` - 1, and place auth file into `~/ts/config` folder for enabling basic auth
-- `TS_RDB` - if 1, then the enabling `--rdb` flag
-- `TS_DONTKILL` - if 1, then the enabling `--dontkill` flag
-- `TS_PORT` - for changind default port to **5555** (example), also u need to change `-p 8090:8090` to `-p 5555:5555` (example)
-- `TS_CONF_PATH` - for overriding torrserver config path inside container. Example `/opt/tsss`
-- `TS_TORR_DIR` - for overriding torrents directory. Example `/opt/torr_files`
-- `TS_LOG_PATH` - for overriding log path. Example `/opt/torrserver.log`
-- `TS_PROXYURL` - set proxy URL for BitTorrent traffic (http, socks4, socks5, socks5h), example: socks5h://user:password@example.com:2080
-- `TS_PROXYMODE` - set proxy mode: "tracker" (only HTTP trackers, default), "peers" (only peer connections), or "full" (all traffic)
+- `TS_HTTPAUTH` – Set to `1` to enable basic authentication. The authentication file must be placed in the `~/ts/config` directory. This also protects the MCP endpoint at `/mcp`.
+- `TS_RDB` – If set to `1`, enables the `--rdb` command-line flag.
+- `TS_DONTKILL` – If set to `1`, enables the `--dontkill` command-line flag.
+- `TS_IP` – Specifies the bind address for the web server using the `--ip` flag.
+- `TS_PORT` – Overrides the default port (e.g., to `5555`). The corresponding port mapping must also be updated from `-p 8090:8090` to `-p 5555:5555` to reflect the change.
+- `TS_CONF_PATH` – Overrides the internal configuration path for TorrServer inside the container (e.g., `/opt/tsss`).
+- `TS_TORR_DIR` – Overrides the directory used for storing torrent files (e.g., `/opt/torr_files`).
+- `TS_TORR_ADDR` – Sets the torrent client address via the `--torrentaddr` flag.
+- `TS_LOG_PATH` – Overrides the log file path (e.g., `/opt/torrserver.log`).
+- `TS_PROXYURL` – Defines a proxy URL for BitTorrent traffic. Supports HTTP, SOCKS4, SOCKS5, and SOCKS5H protocols (e.g., `socks5h://user:password@example.com:2080`).
+- `TS_PROXYMODE` – Determines the proxy usage mode. Acceptable values are:
+  - `tracker` – Proxy only HTTP trackers (default).
+  - `peers` – Proxy only peer connections.
+  - `full` – Proxy all BitTorrent traffic.
+- `TS_SEARCH_WA_ENABLE` – If set to `1`, enables the `--searchwa` flag.
+- `TS_SSL_ENABLE` – If set to `1`, enables the `--ssl` flag.
+- `TS_SSL_PORT` – If set to `1`, enables the `--sslport` flag.
+- `TS_SSL_CERT_PATH` – Specifies the path to the SSL certificate file via the `--sslcert` flag.
+- `TS_SSL_KEY_PATH` – Specifies the path to the SSL private key file via the `--sslkey` flag.
+- `TS_FORCE_HTTPS_ENABLE` – If set to `1`, enables the `--force-https` flag.
+- `TS_WEB_LOG_PATH` – Overrides the web server log path using the `--weblogpath` flag.
+- `TS_PUBLIC_IPV4_ADDR` – Sets the public IPv4 address using the `--pubipv4` flag.
+- `TS_PUBLIC_IPV6_ADDR` – Sets the public IPv6 address using the `--pubipv6` flag.
+- `TS_MAX_SIZE` – Defines the maximum allowed stream size (in bytes) via the `--maxsize` flag.
+- `TS_TELEGRAM_TOKEN` – Sets the Telegram bot token using the `--tg` flag.
+- `TS_FUSE_PATH` – Sets the FUSE mount point path using the `--fuse` flag.
+- `TS_WEBDAV_ENABLE` – If set to `1`, enables WebDAV support via the `--webdav` flag.
 
-Example with full overrided command (on default values):
+Example with full override command (on default values):
 
 ```bash
 docker run --rm -d -e TS_PORT=5665 -e TS_DONTKILL=1 -e TS_HTTPAUTH=1 -e TS_RDB=1 -e TS_CONF_PATH=/opt/ts/config -e TS_LOG_PATH=/opt/ts/log -e TS_TORR_DIR=/opt/ts/torrents -e TS_PROXYURL=socks5h://user:password@example.com:2080 -e TS_PROXYMODE=tracker --name torrserver -v ~/ts:/opt/ts -p 5665:5665 ghcr.io/yourok/torrserver:latest
@@ -339,7 +368,7 @@ To build an Android server you will need the Android Toolchain.
 ```bash
 go install github.com/swaggo/swag/cmd/swag@latest
 cd server
-swag init -g web/server.go --parseDependency --parseInternal --parseDepth 5
+swag init -g web/server.go --parseInternal --parseDepth 5
 
 # Documentation can be linted using
 swag fmt
@@ -352,6 +381,43 @@ Standard binaries serve a filtered Swagger spec at runtime (only `/gst/settings`
 ### API Docs
 
 API documentation is hosted as Swagger format available at path `/swagger/index.html`.
+
+### MCP (AI agents)
+
+TorrServer exposes a native [Model Context Protocol](https://modelcontextprotocol.io/) server at **`/mcp`** on the same HTTP(S) port as the web UI (default `8090`). OpenClaw, Hermes, and other MCP clients can list, add, and manage torrents, and get a play URL for the next unwatched TV episode. The REST API is unchanged.
+
+Endpoint: `http://<host>:8090/mcp` (or `https://` when `--ssl` is enabled).
+
+When HTTP auth is on (`-a` / `TS_HTTPAUTH=1`), MCP uses the same Basic credentials as the rest of the API (`accs.db`). Play links returned by tools are ordinary HTTP URLs for VLC, mpv, or a browser.
+
+**OpenClaw** (`openclaw.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "torrserver": {
+        "url": "http://127.0.0.1:8090/mcp",
+        "transport": "streamable-http"
+      }
+    }
+  }
+}
+```
+
+With auth, add `"headers": { "Authorization": "Basic <base64-user-pass>" }`.
+
+**Hermes** (`~/.hermes/config.yaml`):
+
+```yaml
+mcp_servers:
+  torrserver:
+    url: "http://127.0.0.1:8090/mcp"
+    headers:
+      Authorization: "Basic <base64-user-pass>"
+```
+
+See [server/mcp/README.md](server/mcp/README.md) for the tool list and next-unwatched behavior.
 
 ## Authentication
 
@@ -368,24 +434,125 @@ The users data file should be located near to the settings. Basic auth, read mor
 
 Note: You should enable authentication with -a (--httpauth) TorrServer startup option.
 
-## Whitelist/Blacklist IP
+## Retrackers
 
-The lists file should be located in the same directory with config.db.
+When adding a torrent, TorrServer can modify announce trackers according to **Settings → Additional → Retrackers**:
 
-- Whitelist file name: `wip.txt`
-- Blacklist file name: `bip.txt`
+| Mode | Behavior |
+|------|----------|
+| Don't add | Leave magnet/file trackers unchanged |
+| Add (default) | Append the configured default/remote list |
+| Remove | Clear trackers from the torrent |
+| Replace | Replace with the configured default/remote list |
 
-Whitelist has priority over everything else.
+Related settings (same Web UI section, also via `POST /settings`):
 
-Example:
+- **`TrackersListURL`** — optional custom remote list URL. Leave **empty** to use the built-in ngosang `trackers_best_ip.txt` mirrors (tried in order):
+  1. `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt`
+  2. `https://ngosang.github.io/trackerslist/trackers_best_ip.txt`
+  3. `https://cdn.jsdelivr.net/gh/ngosang/trackerslist@master/trackers_best_ip.txt`
+  4. `https://raw.githack.com/ngosang/trackerslist/master/trackers_best_ip.txt`
+  
+  If set, the custom URL is tried **first**, then the mirrors (duplicates are skipped). Failed/timed-out fetches fall back to the next URL, then to `DefaultTrackers` if all fail (5s timeout per URL).
+- **`DefaultTrackers`** — local announce URLs, one per line (`udp`/`http`/`https`/`wss`; `#` comments allowed). Used alone when all remote fetches fail, or merged after a successful remote fetch.
 
-```text
-local:127.0.0.0-127.0.0.255
-127.0.0.0-127.0.0.255
-local:127.0.0.1
-127.0.0.1
-# at the beginning of the line, comment
+Optional file overlay (always appended when present): put `trackers.txt` in the config directory (`--path` / `-d`), next to `config.db`. Only lines starting with `udp` or `http` are read from that file.
+
+## Web Application Firewall (WAF)
+
+TorrServer includes an HTTP access WAF that filters clients by IP address and by the `Referer` and `Origin` request headers. Configure it from **Settings → WAF** or through the authenticated `/waf` API.
+
+### Configuration
+
+WAF configuration is stored in the top-level **`waf`** object in **`settings.json`**. Each rule is a separate array entry:
+
+```json
+{
+  "waf": {
+    "version": 1,
+    "whitelist": [
+      "127.0.0.1",
+      "::1",
+      "10.0.0.0/8"
+    ],
+    "blacklist": [
+      "203.0.113.0/24"
+    ],
+    "referers": [
+      "example.com"
+    ]
+  }
+}
 ```
+
+On first start, if `settings.json` has **no** `waf` key yet and legacy ACL files **`wip.txt`** (whitelist) / **`bip.txt`** (blacklist) exist in the config directory (same place as `config.db`), TorrServer imports them into `waf` arrays and renames the sources to **`wip.txt.bak`** / **`bip.txt.bak`**. Those backups are not read again. If a `waf` key already exists (even with empty lists), legacy files are left untouched.
+
+Changes saved through the web UI or API are applied immediately. After editing `settings.json` manually, restart TorrServer to load the changes.
+
+### IP rules
+
+Rules:
+
+- If the whitelist is **not empty**, the client IP must match it.
+- If the blacklist is **not empty**, a matching client IP is banned even when it is also on the whitelist.
+- An empty whitelist or blacklist disables that IP check.
+- Invalid entries are skipped and reported as warnings; valid entries remain active.
+- Banned responses use HTTP **403** with body `Banned`.
+- Client IP is taken from the TCP peer address (`RemoteAddr`). Reverse-proxy headers are not trusted by default.
+
+Supported array-entry formats include IPv4, IPv6, ranges, CIDR blocks, comments, and optional descriptions:
+
+```json
+[
+  "# comment",
+  "127.0.0.1",
+  "local:127.0.0.1",
+  "127.0.0.0-127.0.0.255",
+  "local:127.0.0.0-127.0.0.255",
+  "10.0.0.0/8",
+  "lan:10.0.0.0/8",
+  "2001:db8::1",
+  "local:2001:db8::1",
+  "2001:db8::/32"
+]
+```
+
+### Referer and Origin rules
+
+Block HTTP requests that come from unwanted sites (for example mirror pages that embed your TorrServer streams).
+
+- Each entry is a hostname. URLs with only an HTTP/HTTPS scheme and host are also accepted.
+- A rule blocks the hostname and all its subdomains.
+- Both `Referer` and `Origin` are checked before the IP allowlist, so an IP whitelist match cannot bypass a referer rule.
+- Requests without either header are allowed.
+- Protected internal rules remain active and are not displayed in the web UI.
+
+```json
+{
+  "referers": [
+    "example.com",
+    "evil.example.org",
+    "# comment"
+  ]
+}
+```
+
+### API
+
+`GET /waf` returns the active editable lists, status flags, and parse warnings. `POST /waf` atomically replaces all three editable lists and hot-reloads the WAF. The API uses newline-delimited strings for compatibility with the web text editors; all fields are required and an empty string clears a list.
+
+```shell
+curl -u USER:PASSWORD http://127.0.0.1:8090/waf
+
+curl -u USER:PASSWORD \
+  -H 'Content-Type: application/json' \
+  -d '{"whitelist":"127.0.0.1\n::1\n10.0.0.0/8","blacklist":"","referers":"example.com"}' \
+  http://127.0.0.1:8090/waf
+```
+
+In read-only mode, `GET /waf` remains available but `POST /waf` returns HTTP **403**.
+
+> **Note:** BitTorrent peer IP filtering uses a separate PeerGuardian-style file named `blocklist` in the config directory. That list is not managed by Settings → WAF / `/waf`.
 
 ## Torznab
 

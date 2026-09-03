@@ -24,13 +24,14 @@ import (
 	"server/web/msx"
 
 	"server/log"
+	"server/mcp"
 	"server/torr"
 	"server/version"
 	"server/web/api"
 	"server/web/auth"
-	"server/web/blocker"
 	"server/web/pages"
 	"server/web/sslcerts"
+	"server/web/waf"
 )
 
 var (
@@ -72,15 +73,20 @@ func Start() {
 	corsCfg := cors.DefaultConfig()
 	corsCfg.AllowAllOrigins = true
 	corsCfg.AllowPrivateNetwork = true
-	corsCfg.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "X-Requested-With", "Accept", "Authorization"}
+	corsCfg.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "HEAD", "OPTIONS", "DELETE"}
+	corsCfg.AllowHeaders = []string{
+		"Origin", "Content-Length", "Content-Type", "X-Requested-With", "Accept", "Authorization",
+		"Mcp-Protocol-Version", "Mcp-Session-Id", "Last-Event-ID", "Mcp-Method", "Mcp-Name",
+	}
 
 	route := gin.New()
-	route.Use(log.WebLogger(), blocker.Blocker(), gin.Recovery(), cors.New(corsCfg), location.Default())
+	route.Use(log.WebLogger(), waf.WAF(), gin.Recovery(), cors.New(corsCfg), location.Default())
 	auth.SetupAuth(route)
 
 	route.GET("/echo", echo)
 
 	api.SetupRoute(route)
+	mcp.Mount(route.Group("/", auth.CheckAuth()))
 	gstreamer.SetupRoute(route)
 	msx.SetupRoute(route)
 	pages.SetupRoute(route)
