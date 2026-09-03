@@ -94,9 +94,9 @@ type BTSets struct {
 
 	// Auto-save playback position (resume). While a stream runs and when it ends, the
 	// read head minus the client's buffer is stored in the viewed data, in seconds.
-	SavePosition bool // enable auto-saving playback position (needs ffprobe)
-	BufferSizeMB int  // fallback player buffer in MB, used when it cannot be measured
-	AutoBuffer   bool // measure the client's buffer from how it loads data
+	SavePosition  bool // enable auto-saving playback position (needs ffprobe)
+	SmartTimecode bool // read the time out of the container instead of the average bitrate
+	BufferSizeMB  int  // player buffer in MB, only for containers with no timestamps to read
 }
 
 func (v *BTSets) String() string {
@@ -184,6 +184,7 @@ func SetDefaultConfig() {
 	sets.EnableLPD = true
 	sets.LPDIPv6 = false
 	sets.EnableBonjour = true
+	sets.SmartTimecode = true
 	// Set default TMDB settings
 	sets.TMDBSettings = TMDBConfig{
 		APIKey:     "",
@@ -224,6 +225,10 @@ func loadBTSets() {
 			if json.Unmarshal(buf, &raw) == nil {
 				if _, ok := raw["EnableBonjour"]; !ok {
 					BTsets.EnableBonjour = true
+				}
+				// Same for reading timecodes out of the container: on unless turned off.
+				if _, ok := raw["SmartTimecode"]; !ok {
+					BTsets.SmartTimecode = true
 				}
 			}
 			return

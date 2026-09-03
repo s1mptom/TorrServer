@@ -74,7 +74,7 @@ export default function SecondarySettingsComponent({ settings, inputForm }) {
     ShowFSActiveTorr,
     SavePosition,
     BufferSizeMB,
-    AutoBuffer,
+    SmartTimecode,
   } = settings || {}
 
   // Saving the playback position needs the real media duration, which comes from ffprobe
@@ -455,24 +455,24 @@ export default function SecondarySettingsComponent({ settings, inputForm }) {
         <FormControlLabel
           control={
             <Switch
-              checked={!!AutoBuffer}
+              checked={!!SmartTimecode}
               onChange={inputForm}
-              id='AutoBuffer'
+              id='SmartTimecode'
               color='secondary'
               disabled={!ffprobeAvailable || !SavePosition}
             />
           }
-          label={t('SettingsDialog.AutoBuffer')}
+          label={t('SettingsDialog.SmartTimecode')}
           labelPlacement='start'
         />
-        <FormHelperText margin='none'>{t('SettingsDialog.AutoBufferHint')}</FormHelperText>
+        <FormHelperText margin='none'>{t('SettingsDialog.SmartTimecodeHint')}</FormHelperText>
       </FormGroup>
       <TextField
         onChange={inputForm}
         margin='normal'
         id='BufferSizeMB'
-        label={AutoBuffer ? t('SettingsDialog.BufferSizeMBFallback') : t('SettingsDialog.BufferSizeMB')}
-        helperText={AutoBuffer ? t('SettingsDialog.BufferSizeMBFallbackHint') : t('SettingsDialog.BufferSizeMBHint')}
+        label={t('SettingsDialog.BufferSizeMB')}
+        helperText={t('SettingsDialog.BufferSizeMBHint')}
         InputProps={{
           endAdornment: <InputAdornment position='end'>{t('MB')}</InputAdornment>,
         }}

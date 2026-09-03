@@ -2,14 +2,15 @@ package torrstor
 
 import (
 	"io"
-	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
 
 	"server/log"
 	"server/settings"
+	"server/timeindex"
 )
 
 type Reader struct {
@@ -27,17 +28,25 @@ type Reader struct {
 	anchorSet bool
 	firstRead time.Time
 	lastRead  time.Time
-	// Buffer auto-measure. A client tops its buffer up in bursts rather than reading
-	// evenly, so the rate is only meaningful averaged over a window. Positions are
-	// sampled once a second and the buffer is derived from them; once derived it is
-	// kept and sampling stops.
 	posMu     sync.Mutex
-	samples   []posSample
-	sampledAt time.Time
-	buffer    int64
-	bufferSet bool
-	fillSecs  float64 // how long the lead took to build, for logging
-	playRate  float64 // playback speed it was measured against, for logging
+
+	// index turns the byte offsets this reader hands out into playback time; feeder is this
+	// connection's own way into it, filled from the bytes as they go past.
+	index  *timeindex.Index
+	feeder *timeindex.Feeder
+
+	// Where the picture is, in film time, tracked as the session runs. See progress.go.
+	pos progress
+
+	// Which side each read waited on, added up between one step of the reckoning and the next.
+	// Guarded by posMu, like everything else the tracker reads.
+	clientWait time.Duration
+	supplyWait time.Duration
+	readEnded  time.Time
+
+	// An identity for the cache's per-file trail, which tells this reader's entries from those
+	// of the other connections a player opens to the same file.
+	id int64
 
 	cache    *Cache
 	isClosed bool
@@ -48,10 +57,15 @@ type Reader struct {
 	mu         sync.Mutex
 }
 
+var readerSeq int64
+
 func newReader(file *torrent.File, cache *Cache) *Reader {
 	r := new(Reader)
+	r.id = atomic.AddInt64(&readerSeq, 1)
 	r.file = file
 	r.Reader = file.NewReader()
+	r.index = cache.TimeIndex(file.Path())
+	r.feeder = r.index.Feeder()
 
 	r.SetReadahead(0)
 	r.cache = cache
@@ -89,7 +103,25 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 	}
 	if r.file.Torrent() != nil && r.file.Torrent().Info() != nil {
 		r.readerOn()
+		// Which side is holding things up. Between one read returning and the next being
+		// asked for, the HTTP layer is writing to the client, and if that takes a while it is
+		// because the client is not draining — it has nowhere to put more, so it is full.
+		// Inside the read, the wait is for the torrent to supply, and that says nothing about
+		// the client at all.
+		//
+		// Borrowed from how congestion control keeps its bandwidth estimates honest: a sample
+		// taken while the sender had nothing to send describes the sender, not the path, and
+		// is marked and set aside rather than averaged in. The same distinction is what
+		// separates a client that is full from one that is starving, and from outside the two
+		// look identical — the head crawls either way.
+		began := time.Now()
+		if !r.readEnded.IsZero() {
+			r.clientWait += began.Sub(r.readEnded)
+		}
 		n, err = r.Reader.Read(p)
+		done := time.Now()
+		r.supplyWait += done.Sub(began)
+		r.readEnded = done
 
 		// samsung tv fix xvid/divx
 		//if r.offset == 0 && len(p) >= 192 {
@@ -110,7 +142,11 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		//}
 
 		r.trackPosition(n)
+		if r.TimeIndex() != nil {
+			r.feeder.Feed(r.offset, p[:n])
+		}
 		r.offset += int64(n)
+		r.trackShown()
 		r.lastAccess = time.Now().Unix()
 	} else {
 		log.TLogln("Torrent closed and readed")
@@ -118,143 +154,235 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 	return
 }
 
-// Buffer measurement tuning. A client tops its buffer up in bursts, so a rate only means
-// something when averaged over a window; playback speed is taken from the tail of the
-// session, once two consecutive windows agree that it has settled.
-const (
-	steadyPhase = 30.0    // seconds of playback averaged into one rate window
-	steadyDrift = 0.4     // how much two consecutive windows may differ and still count as settled
-	maxSamples  = 20 * 60 // once a second, so twenty minutes of history
-	minBuffer   = 4 << 20
-	maxBuffer   = 1 << 30
-)
-
-// posSample is where the reader stood at a moment in time.
-type posSample struct {
-	at  time.Time
-	off int64
-}
-
-// indexBefore returns the latest sample at least d seconds older than samples[i].
-func indexBefore(samples []posSample, i int, d float64) int {
-	for j := i - 1; j >= 0; j-- {
-		if samples[i].at.Sub(samples[j].at).Seconds() >= d {
-			return j
-		}
-	}
-	return -1
-}
-
-// trackPosition records the playback anchor and the buffer-fill dynamics. Called from
-// Read before the offset is advanced, so r.offset is where this read started.
+// trackPosition records where playback started. It is called from Read before the offset is
+// advanced, so r.offset is where this read began — and the first such offset is the byte the
+// client asked for, which is where its picture starts.
 func (r *Reader) trackPosition(n int) {
 	if n <= 0 {
 		return
 	}
 	now := time.Now()
+	// Written from the reading goroutine and read from three others — the torrent status, the
+	// cache state and the saving ticker. A time.Time is several words, so an unguarded read
+	// can come out torn, and SessionSeconds gates both the saving and the anti-overshoot
+	// ceiling.
+	r.posMu.Lock()
+	defer r.posMu.Unlock()
 	if !r.anchorSet {
 		r.anchor = r.offset
 		r.anchorSet = true
 		r.firstRead = now
-		r.lastRead = now
-		return
 	}
 	r.lastRead = now
-	if r.bufferSet || now.Sub(r.sampledAt) < time.Second {
-		return
-	}
-	r.sampledAt = now
-	r.posMu.Lock()
-	if len(r.samples) < maxSamples {
-		r.samples = append(r.samples, posSample{at: now, off: r.offset})
-	}
-	r.posMu.Unlock()
 }
 
 // Anchor is the offset where playback started (client's Range target), and whether it is known.
 func (r *Reader) Anchor() (int64, bool) {
+	r.posMu.Lock()
+	defer r.posMu.Unlock()
 	return r.anchor, r.anchorSet
+}
+
+// File is what this reader streams.
+func (r *Reader) File() *torrent.File {
+	return r.file
+}
+
+// TimeIndex turns byte offsets in this file into playback time. It is nil for containers
+// that carry no timestamps, and while the feature is switched off.
+func (r *Reader) TimeIndex() *timeindex.Index {
+	if !settings.BTsets.SmartTimecode {
+		return nil
+	}
+	return r.index
+}
+
+const (
+	// What a connection must have delivered before what it reports is worth handing to the
+	// next one. This is measured in bytes rather than in seconds, and that is the whole point:
+	// a time gate looks like it separates real playback from probes, and does not. A player
+	// paused the moment it opens fills its buffer and stops, and on a fast link that is over
+	// in sixteen seconds — under a twenty-second gate it hands on nothing, the connection that
+	// follows starts believing the client holds nothing, and the position sits a whole buffer
+	// in front of the picture for the rest of the session. Measured that way it ran 25 seconds
+	// ahead and stayed there, which is the one thing that must not happen.
+	//
+	// The distinction that does hold is size. A header read is under a megabyte, ffprobe takes
+	// a few; nothing that is actually feeding a player stops this short.
+	handoverMinBytes = 32 << 20
+	// Used if the configured buffer is missing, e.g. in a settings file written before it existed.
+	fallbackBuffer = 32 << 20
+	// Reading to within this margin of the end means the file was watched to the end.
+	eofMargin = 8 << 20
+)
+
+// trackShown moves the picture on by however much the last read allows. The reasoning lives
+// in progress.go; here it is only fed the film time at the read head, once a second.
+func (r *Reader) trackShown() {
+	index := r.TimeIndex()
+	if index == nil || !r.anchorSet {
+		return
+	}
+	now := time.Now()
+
+	r.posMu.Lock()
+	defer r.posMu.Unlock()
+	if !r.pos.set {
+		// The film time this session started at has to come from a timestamp this connection
+		// found itself. The index belongs to the file and keeps what earlier sessions read,
+		// so asking it what plays at the byte this one began on can be answered from far
+		// ahead — a rewind lands in front of everything the previous session indexed.
+		sec, ok := r.feeder.First()
+		if !ok {
+			return
+		}
+		off, ok := index.OffsetAt(sec)
+		if !ok {
+			off = r.anchor
+		}
+		held, box := r.inherited(index, off)
+		r.pos.start(sec, off, r.firstRead, held, box, index)
+	}
+	if now.Sub(r.pos.at) < time.Second {
+		return
+	}
+	// Between the timestamps, not rounded back to the last one: the tracker measures how the
+	// position moves, and a reading that advances in steps looks like a picture that keeps
+	// stalling and catching up.
+	if head, ok := index.TimeBetween(r.offset); ok {
+		r.pos.waited(r.clientWait, r.supplyWait)
+		r.clientWait, r.supplyWait = 0, 0
+		r.pos.step(head, r.offset, index, now)
+	}
+	// Leave a trail for whatever connection comes next: where this one has read to, and how
+	// much the client is holding there. Read straight off the tracker — the lock is already
+	// held here, and the public form would take it a second time and stop the reader dead.
+	//
+	// Only from a connection that has been streaming for a while. A player opens several at
+	// once — one for the header, one for the picture, a probe alongside — and they all read
+	// the same file. Letting the short ones write here mixes their offsets and their holdings
+	// in with the one that is actually playing, and what the next connection then inherits is
+	// nobody's buffer in particular.
+	if r.offset-r.anchor >= handoverMinBytes {
+		sec, _ := r.pos.screen()
+		r.cache.noteRead(r.file.Path(), r.id, r.offset, r.pos.handOn(), r.pos.box(), r.pos.pictureAt(), sec)
+	}
+}
+
+// Tick moves the reckoning on without a read, and it is not optional. The tracker is
+// otherwise driven only by Read, so the one event worth noticing — the client stopping,
+// which it does when it has nowhere left to put anything — is the very event that stops
+// anything from noticing it. Measured on a real player through a whole paused warm-up: not
+// one step took a silence branch, because not one step ran. Everything built on silence was
+// alive in the tests, where the clock is turned by hand, and dead everywhere else.
+func (r *Reader) Tick() {
+	if r == nil || r.isClosed {
+		return
+	}
+	r.trackShown()
+}
+
+// inherited is what the client was already holding when this connection opened, in film
+// seconds, taken from what the previous connection to the same file left behind.
+func (r *Reader) inherited(_ *timeindex.Index, startOff int64) (int64, int64) {
+	held, box, _ := r.cache.takeOver(r.file.Path(), startOff)
+	return held, box
+}
+
+// FurthestScreen is the furthest the picture can have reached, going by where an earlier
+// connection to this file left it and the time since. It bounds a fresh session, which would
+// otherwise put the picture a whole buffer ahead of itself.
+func (r *Reader) FurthestScreen() (float64, bool) {
+	return r.cache.FurthestScreen(r.file.Path())
+}
+
+// HeldSeconds is how much film the client is holding ahead of the picture, and whether that
+// is known.
+func (r *Reader) HeldSeconds() (float64, bool) {
+	if r.TimeIndex() == nil {
+		return 0, false
+	}
+	r.posMu.Lock()
+	defer r.posMu.Unlock()
+	if !r.pos.set {
+		return 0, false
+	}
+	return r.pos.held(), true
+}
+
+// ClientBuffer is how much the client is holding ahead of the picture, in bytes. When the
+// container carries timestamps this is a measurement, worked out in film time and converted
+// back. Otherwise it is the configured guess, which is all a file without timestamps allows.
+func (r *Reader) ClientBuffer() (int64, bool) {
+	if screen, ok := r.screenFromTime(); ok {
+		return r.offset - screen, true
+	}
+	buffer := int64(settings.BTsets.BufferSizeMB) * 1024 * 1024
+	if buffer <= 0 {
+		buffer = fallbackBuffer
+	}
+	return buffer, false
+}
+
+// ScreenTime is where the picture is, in film time.
+func (r *Reader) ScreenTime() (float64, bool) {
+	if r.TimeIndex() == nil {
+		return 0, false
+	}
+	r.posMu.Lock()
+	defer r.posMu.Unlock()
+	return r.pos.screen()
+}
+
+// screenFromTime is the same answer as a byte offset, for the parts that speak in offsets:
+// the cache map, and the gate that tells a viewing session from a probe.
+func (r *Reader) screenFromTime() (int64, bool) {
+	sec, ok := r.ScreenTime()
+	if !ok {
+		return 0, false
+	}
+	return r.TimeIndex().OffsetAt(sec)
+}
+
+// ScreenOffset is the byte the picture is at. It never runs behind where playback started,
+// and reading to within a margin of the end counts as watched to the end.
+func (r *Reader) ScreenOffset() int64 {
+	flen := r.file.Length()
+	anchor, _ := r.Anchor()
+	screen, ok := r.screenFromTime()
+	if !ok {
+		buffer, _ := r.ClientBuffer()
+		screen = r.offset - buffer
+	}
+	if screen < anchor {
+		screen = anchor
+	}
+	// Judged on where the picture is, not on how far reading has got. A client holding a few
+	// hundred megabytes reaches the end of the file minutes before it shows the end of the
+	// film, and marking that as watched throws the real position away. The margin only means
+	// anything for a file longer than itself.
+	if flen > eofMargin && screen >= flen-eofMargin {
+		screen = flen
+	}
+	if screen > flen {
+		screen = flen
+	}
+	return screen
+}
+
+// getScreenPiece is the piece the picture is in, as opposed to the one being read.
+func (r *Reader) getScreenPiece() int {
+	return r.getPieceNum(r.ScreenOffset())
 }
 
 // SessionSeconds is how long this reader has actually been streaming.
 func (r *Reader) SessionSeconds() float64 {
+	r.posMu.Lock()
+	defer r.posMu.Unlock()
 	if !r.anchorSet {
 		return 0
 	}
 	return r.lastRead.Sub(r.firstRead).Seconds()
-}
-
-// FillStats exposes what the estimate was derived from: the reader's lead over playback,
-// how long it took to build up, and the playback rate it was measured against.
-func (r *Reader) FillStats() (lead int64, leadSeconds, rate float64, measured bool) {
-	r.posMu.Lock()
-	defer r.posMu.Unlock()
-	return r.buffer, r.fillSecs, r.playRate, r.bufferSet
-}
-
-// BufferEstimate derives how much the client keeps buffered ahead of the picture. The
-// buffer is by definition how far the reader runs ahead of playback, so it is the largest
-// lead seen: bytes read beyond the start, minus what playback consumed in the same time.
-// Taking the maximum means a network hiccup while filling cannot cut the measurement
-// short, and the burst-and-idle pattern of topping the buffer up cannot either.
-// The result is kept once found, and sampling stops.
-func (r *Reader) BufferEstimate() (int64, bool) {
-	r.posMu.Lock()
-	defer r.posMu.Unlock()
-	if r.bufferSet {
-		return r.buffer, true
-	}
-	if !r.anchorSet || len(r.samples) < 2 {
-		return 0, false
-	}
-	samples := r.samples
-	last := len(samples) - 1
-
-	// Playback speed, from the tail of the session. Two consecutive windows have to agree,
-	// which is what tells filling (still racing ahead) apart from playing at its own pace.
-	recent := indexBefore(samples, last, steadyPhase)
-	if recent < 0 {
-		return 0, false
-	}
-	earlier := indexBefore(samples, recent, steadyPhase)
-	if earlier < 0 {
-		return 0, false
-	}
-	play := rateBetween(samples[recent], samples[last])
-	prev := rateBetween(samples[earlier], samples[recent])
-	if play <= 0 || math.Abs(prev-play) > steadyDrift*math.Max(prev, play) {
-		return 0, false
-	}
-
-	var lead int64
-	var leadAt time.Time
-	for _, sm := range samples {
-		played := int64(play * sm.at.Sub(r.firstRead).Seconds())
-		if ahead := sm.off - r.anchor - played; ahead > lead {
-			lead, leadAt = ahead, sm.at
-		}
-	}
-	if lead < minBuffer || lead > maxBuffer {
-		return 0, false
-	}
-	// An error in the playback rate is multiplied by the time it took to build the lead,
-	// so watch playback for at least that long before trusting the result.
-	building := leadAt.Sub(r.firstRead).Seconds()
-	if samples[last].at.Sub(leadAt).Seconds() < math.Max(steadyPhase, building) {
-		return 0, false
-	}
-
-	r.buffer, r.bufferSet, r.fillSecs, r.playRate = lead, true, building, play
-	r.samples = nil
-	return lead, true
-}
-
-func rateBetween(from, to posSample) float64 {
-	seconds := to.at.Sub(from.at).Seconds()
-	if seconds <= 0 {
-		return 0
-	}
-	return float64(to.off-from.off) / seconds
 }
 
 func (r *Reader) SetReadahead(length int64) {

@@ -7,6 +7,7 @@ import {
   Delete as DeleteIcon,
 } from '@material-ui/icons'
 import { getPeerString, humanizeSize, humanizeSpeed, removeRedundantCharacters } from 'utils/Utils'
+import { activePlayback, playbackPosition } from 'components/PlaybackReadout'
 import { playlistTorrHost, streamHost, torrentsHost } from 'utils/Hosts'
 import { NoImageIcon } from 'icons'
 import DialogTorrentDetailsContent from 'components/DialogTorrentDetailsContent'
@@ -131,6 +132,18 @@ const audioCodecName = track => {
   }
 }
 
+const samePlayback = (left, right) => {
+  const leftPlay = left || []
+  const rightPlay = right || []
+  return (
+    leftPlay.length === rightPlay.length &&
+    leftPlay.every((entry, index) => {
+      const other = rightPlay[index]
+      return entry.position === other?.position && entry.buffer === other.buffer && entry.head === other.head
+    })
+  )
+}
+
 const sameFileList = (left, right) => {
   const leftFiles = left || []
   const rightFiles = right || []
@@ -189,7 +202,10 @@ const Torrent = ({ torrent }) => {
     stat,
     data,
     file_stats: torrentFileList,
+    playback,
   } = torrent
+
+  const nowPlaying = activePlayback(playback)
 
   const dropTorrent = () => axios.post(torrentsHost(), { action: 'drop', hash })
   const deleteTorrent = () => axios.post(torrentsHost(), { action: 'rem', hash })
@@ -505,7 +521,7 @@ const Torrent = ({ torrent }) => {
           </StyledButton>
         </TorrentCardButtons>
 
-        <TorrentCardDescription>
+        <TorrentCardDescription hasPlayback={Boolean(nowPlaying)}>
           <div className='description-title-wrapper'>
             <div className='description-section-name'>
               {category ? (catIndex >= 0 ? t(catArray.name) : category) : t('Name')}
@@ -513,7 +529,7 @@ const Torrent = ({ torrent }) => {
             <div className='description-torrent-title'>{parsedTitle}</div>
           </div>
 
-          <div className='description-statistics-wrapper'>
+          <div className={`description-statistics-wrapper${nowPlaying ? ' has-playback' : ''}`}>
             <div className='description-statistics-element-wrapper'>
               <div className='description-section-name'>
                 <StatusIndicator stat={stat} />
@@ -533,6 +549,13 @@ const Torrent = ({ torrent }) => {
               <div className='description-section-name'>{t('Peers')}</div>
               <div className='description-statistics-element-value'>{getPeerString(torrent) || '---'}</div>
             </div>
+
+            {nowPlaying && (
+              <div className='description-playback'>
+                {t('OnScreen')}: {playbackPosition(nowPlaying)} · {humanizeSize(nowPlaying.buffer)}{' '}
+                {nowPlaying.buffer_measured ? t('BufferMeasuredMark') : t('BufferFallbackMark')}
+              </div>
+            )}
           </div>
         </TorrentCardDescription>
       </TorrentCard>
@@ -623,6 +646,7 @@ export default memo(Torrent, (prev, next) => {
     p.torrent_size === n.torrent_size &&
     p.download_speed === n.download_speed &&
     p.data === n.data &&
+    samePlayback(p.playback, n.playback) &&
     sameFileList(p.file_stats, n.file_stats)
   )
 })

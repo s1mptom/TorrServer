@@ -67,6 +67,36 @@ type TorrentStatus struct {
 	BitRate             string      `json:"bit_rate,omitempty"`
 
 	FileStats []*TorrentFileStat `json:"file_stats,omitempty"`
+	Playback  []*PlaybackStatus  `json:"playback,omitempty"`
+}
+
+// PlaybackStatus is what a client streaming right now is showing. The read head is ahead of
+// the picture by whatever the client keeps buffered, so the two are reported side by side:
+// Buffer is what was subtracted and BufferMeasured says whether the session produced that
+// number itself or it came from the configured fallback.
+type PlaybackStatus struct {
+	FileIndex      int   `json:"file_index"`
+	FileLength     int64 `json:"file_length,omitempty"`
+	Anchor         int64 `json:"anchor"`
+	Head           int64 `json:"head"`
+	Buffer         int64 `json:"buffer"`
+	BufferMeasured bool  `json:"buffer_measured"`
+	// BufferSeconds is the same buffer in film time, which is what it is measured in when the
+	// container carries timestamps. Zero when it had to be inferred from a bitrate instead.
+	BufferSeconds  float64 `json:"buffer_seconds,omitempty"`
+	SessionSeconds float64 `json:"session_seconds,omitempty"`
+	Position       int64   `json:"position"`
+	TimeCode       float64 `json:"timecode,omitempty"`
+	Duration       float64 `json:"duration,omitempty"`
+	// Source is the container the time was read out of, or "estimate" when the file carries
+	// no timestamps and the average bitrate had to be used.
+	Source string `json:"source,omitempty"`
+	// Raw numbers from the index, for working out where an answer went wrong: the film time
+	// it reports at the read head, and how much of the file it has timestamps for.
+	HeadTime     float64 `json:"head_time,omitempty"`
+	IndexFrom    int64   `json:"index_from,omitempty"`
+	IndexTo      int64   `json:"index_to,omitempty"`
+	IndexSamples int     `json:"index_samples,omitempty"`
 }
 
 type TorrentFileStat struct {

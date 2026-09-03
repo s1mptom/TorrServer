@@ -34,5 +34,5 @@ export default {
   StoreSettingsInJson: true,
   SavePosition: false,
   BufferSizeMB: 32,
-  AutoBuffer: true,
+  SmartTimecode: true,
 }

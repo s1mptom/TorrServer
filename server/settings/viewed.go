@@ -2,6 +2,7 @@ package settings
 
 import (
 	"encoding/json"
+	"sync"
 
 	"server/log"
 )
@@ -66,7 +67,16 @@ func keepTimecode() bool {
 	return BTsets != nil && (BTsets.TrackTimecode || BTsets.SavePosition)
 }
 
+// One writer at a time. The stored value is a blob holding every file of a torrent, so
+// saving one of them reads the blob, changes an entry and writes it back — and two saves
+// running together lose whichever finished first. With a position now saved every thirty
+// seconds per stream, two files of the same torrent playing at once is enough.
+var muViewed sync.Mutex
+
 func SetViewed(vv *Viewed) {
+	muViewed.Lock()
+	defer muViewed.Unlock()
+
 	rec := viewedRec{TimeCode: vv.TimeCode, Offset: vv.Offset, Length: vv.Length, Duration: vv.Duration}
 	if !keepTimecode() {
 		rec = viewedRec{}
@@ -80,6 +90,9 @@ func SetViewed(vv *Viewed) {
 // MarkViewed flags a file as viewed without touching an already stored playback
 // position. Starting a stream must not wipe where the user left off.
 func MarkViewed(hash string, fileIndex int) {
+	muViewed.Lock()
+	defer muViewed.Unlock()
+
 	m := readIndexes(tdb.Get("Viewed", hash))
 	if _, ok := m[fileIndex]; ok {
 		return
@@ -100,6 +113,9 @@ func newViewed(hash string, fileIndex int, rec viewedRec) *Viewed {
 }
 
 func RemViewed(vv *Viewed) {
+	muViewed.Lock()
+	defer muViewed.Unlock()
+
 	buf := tdb.Get("Viewed", vv.Hash)
 	m := readIndexes(buf)
 	if vv.FileIndex != -1 {
