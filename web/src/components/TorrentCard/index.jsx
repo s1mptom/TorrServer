@@ -145,7 +145,8 @@ const sameList = (left, right, keys) => {
 
 // Only what the card shows: the read head moves on every read, and comparing it would
 // re-render the card on every poll while a file is streaming.
-const samePlayback = (left, right) => sameList(left, right, ['position', 'timecode', 'buffer', 'buffer_measured'])
+const samePlayback = (left, right) =>
+  sameList(left, right, ['position', 'timecode', 'buffer', 'buffer_measured', 'viewing'])
 const sameFileList = (left, right) => sameList(left, right, ['id', 'path', 'length'])
 
 const Torrent = ({ torrent }) => {

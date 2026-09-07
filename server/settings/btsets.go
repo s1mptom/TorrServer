@@ -156,9 +156,12 @@ func SetBTSets(sets *BTSets) {
 		sets.TorrentDisconnectTimeout = 30
 	}
 
-	if sets.SavePosition && sets.BufferSizeMB <= 0 {
-		// only used when the buffer cannot be measured
-		sets.BufferSizeMB = 32
+	if sets.BufferSizeMB <= 0 {
+		sets.BufferSizeMB = 32 // only used when the buffer cannot be measured
+	}
+	// Saving the position means storing timecodes; one switch is enough to ask for.
+	if sets.SavePosition {
+		sets.TrackTimecode = true
 	}
 
 	if sets.ReaderReadAHead < 5 {
@@ -267,6 +270,12 @@ func loadBTSets() {
 				if _, ok := raw["SmartTimecode"]; !ok {
 					BTsets.SmartTimecode = true
 				}
+			}
+			if BTsets.BufferSizeMB <= 0 {
+				BTsets.BufferSizeMB = 32
+			}
+			if BTsets.SavePosition {
+				BTsets.TrackTimecode = true
 			}
 			// Upgrade older configs that never had tracker list fields.
 			// Empty TrackersListURL now means "use built-in mirrors".

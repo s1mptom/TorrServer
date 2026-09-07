@@ -83,9 +83,12 @@ type PlaybackStatus struct {
 	// container carries timestamps. Zero when it had to be inferred from a bitrate instead.
 	BufferSeconds  float64 `json:"buffer_seconds,omitempty"`
 	SessionSeconds float64 `json:"session_seconds,omitempty"`
-	Position       int64   `json:"position"`
-	TimeCode       float64 `json:"timecode,omitempty"`
-	Duration       float64 `json:"duration,omitempty"`
+	// Viewing says this connection has passed the same gates the saver uses: it has streamed
+	// long enough and shown something, so it is a viewer rather than a probe or a preload.
+	Viewing  bool    `json:"viewing"`
+	Position int64   `json:"position"`
+	TimeCode float64 `json:"timecode,omitempty"`
+	Duration float64 `json:"duration,omitempty"`
 	// Source is the container the time was read out of, or "estimate" when the file carries
 	// no timestamps and the average bitrate had to be used.
 	Source string `json:"source,omitempty"`

@@ -11,44 +11,34 @@ type Viewed struct {
 	Hash      string  `json:"hash"`
 	FileIndex int     `json:"file_index"`
 	TimeCode  float64 `json:"timecode"`
-	// Playback position details, filled by the auto-save feature. Offset/Length let a
-	// client verify or recompute the position; Duration is the real media duration
-	// (from ffprobe), so clients don't have to guess it from external metadata.
-	Offset   int64   `json:"offset,omitempty"`
-	Length   int64   `json:"length,omitempty"`
+	// Duration is the real length of the media the timecode was taken from, when the server
+	// saved the position itself. A client showing progress needs it: the runtime a catalogue
+	// gives for a title is not the length of this particular file, which may have had its
+	// intro cut or an advert left in.
 	Duration float64 `json:"duration,omitempty"`
 }
 
-// viewedRec is the persisted per-file record. Older databases hold a bare float
-// (timecode) or, even older, an empty struct; readIndexes migrates both on read.
+// viewedRec is the persisted per-file record.
 type viewedRec struct {
 	TimeCode float64 `json:"tc"`
-	Offset   int64   `json:"off,omitempty"`
-	Length   int64   `json:"len,omitempty"`
 	Duration float64 `json:"dur,omitempty"`
 }
 
+// readIndexes reads the records of one torrent's files. Databases written before positions
+// were saved here hold a bare timecode per file, and older ones still an empty object; both
+// are read as a record with what they carry.
 func readIndexes(buf []byte) map[int]viewedRec {
+	m := map[int]viewedRec{}
 	if len(buf) == 0 {
-		return map[int]viewedRec{}
+		return m
 	}
-	recs := map[int]viewedRec{}
-	if json.Unmarshal(buf, &recs) == nil {
-		return recs
+	if json.Unmarshal(buf, &m) == nil {
+		return m
 	}
 	timecodes := map[int]float64{}
 	if json.Unmarshal(buf, &timecodes) == nil {
-		m := make(map[int]viewedRec, len(timecodes))
-		for k, v := range timecodes {
-			m[k] = viewedRec{TimeCode: v}
-		}
-		return m
-	}
-	legacy := map[int]struct{}{}
-	m := map[int]viewedRec{}
-	if json.Unmarshal(buf, &legacy) == nil {
-		for k := range legacy {
-			m[k] = viewedRec{}
+		for k, tc := range timecodes {
+			m[k] = viewedRec{TimeCode: tc}
 		}
 	}
 	return m
@@ -63,10 +53,6 @@ func storeIndexes(hash string, m map[int]viewedRec) {
 	tdb.Set("Viewed", hash, buf)
 }
 
-func keepTimecode() bool {
-	return BTsets != nil && (BTsets.TrackTimecode || BTsets.SavePosition)
-}
-
 // One writer at a time. The stored value is a blob holding every file of a torrent, so
 // saving one of them reads the blob, changes an entry and writes it back — and two saves
 // running together lose whichever finished first. With a position now saved every thirty
@@ -77,11 +63,10 @@ func SetViewed(vv *Viewed) {
 	muViewed.Lock()
 	defer muViewed.Unlock()
 
-	rec := viewedRec{TimeCode: vv.TimeCode, Offset: vv.Offset, Length: vv.Length, Duration: vv.Duration}
-	if !keepTimecode() {
+	rec := viewedRec{TimeCode: vv.TimeCode, Duration: vv.Duration}
+	if BTsets == nil || !BTsets.TrackTimecode {
 		rec = viewedRec{}
 	}
-
 	m := readIndexes(tdb.Get("Viewed", vv.Hash))
 	m[vv.FileIndex] = rec
 	storeIndexes(vv.Hash, m)
@@ -101,23 +86,11 @@ func MarkViewed(hash string, fileIndex int) {
 	storeIndexes(hash, m)
 }
 
-func newViewed(hash string, fileIndex int, rec viewedRec) *Viewed {
-	return &Viewed{
-		Hash:      hash,
-		FileIndex: fileIndex,
-		TimeCode:  rec.TimeCode,
-		Offset:    rec.Offset,
-		Length:    rec.Length,
-		Duration:  rec.Duration,
-	}
-}
-
 func RemViewed(vv *Viewed) {
 	muViewed.Lock()
 	defer muViewed.Unlock()
 
-	buf := tdb.Get("Viewed", vv.Hash)
-	m := readIndexes(buf)
+	m := readIndexes(tdb.Get("Viewed", vv.Hash))
 	if vv.FileIndex != -1 {
 		delete(m, vv.FileIndex)
 		storeIndexes(vv.Hash, m)
@@ -127,30 +100,19 @@ func RemViewed(vv *Viewed) {
 }
 
 func ListViewed(hash string) []*Viewed {
-	if hash != "" {
-		buf := tdb.Get("Viewed", hash)
-		if len(buf) == 0 {
-			return []*Viewed{}
-		}
-		m := readIndexes(buf)
-		var ret []*Viewed
-		for i, rec := range m {
-			ret = append(ret, newViewed(hash, i, rec))
-		}
-		return ret
-	} else {
-		var ret []*Viewed
-		keys := tdb.List("Viewed")
-		for _, key := range keys {
-			buf := tdb.Get("Viewed", key)
-			if len(buf) == 0 {
-				continue
-			}
-			m := readIndexes(buf)
-			for i, rec := range m {
-				ret = append(ret, newViewed(key, i, rec))
-			}
-		}
-		return ret
+	keys := []string{hash}
+	if hash == "" {
+		keys = tdb.List("Viewed")
 	}
+	ret := []*Viewed{}
+	for _, key := range keys {
+		buf := tdb.Get("Viewed", key)
+		if len(buf) == 0 {
+			continue
+		}
+		for i, rec := range readIndexes(buf) {
+			ret = append(ret, &Viewed{Hash: key, FileIndex: i, TimeCode: rec.TimeCode, Duration: rec.Duration})
+		}
+	}
+	return ret
 }

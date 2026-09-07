@@ -3,13 +3,15 @@ import { humanizeSize, humanizeTime } from 'utils/Utils'
 
 import { ReadoutField, ReadoutNote, ReadoutTitle, ReadoutValue, ReadoutWrapper } from './style'
 
-// The reader that is furthest into its session is the one someone is watching: preloads and
-// probes open readers too, but they are short-lived.
+// The reader someone is watching: the server flags those that have streamed long enough and
+// shown something, and among them the furthest into its session wins. Preloads and probes
+// open readers too, but they are short-lived and never flagged.
 export const activePlayback = playback =>
-  (playback || []).reduce(
-    (best, entry) => (!best || (entry.session_seconds || 0) > (best.session_seconds || 0) ? entry : best),
-    null,
-  )
+  (playback || []).reduce((best, entry) => {
+    if (!best) return entry
+    if (!!entry.viewing !== !!best.viewing) return entry.viewing ? entry : best
+    return (entry.session_seconds || 0) > (best.session_seconds || 0) ? entry : best
+  }, null)
 
 // What the position is worth knowing by: where the picture is, and how much was assumed to
 // sit in the player ahead of it. Without a duration only the offset is meaningful.

@@ -204,6 +204,15 @@ func (t *Torrent) progressEvent() {
 	}
 	t.muTorrent.Unlock()
 
+	// The position reckoning is turned over from here rather than from each stream. It has
+	// to keep looking after the reads have stopped: a client going quiet is the one thing
+	// worth noticing, and the one thing a tracker driven only by Read never sees.
+	if t.cache != nil && positionSavingEnabled() {
+		for _, r := range t.cache.ReaderList() {
+			r.Tick()
+		}
+	}
+
 	t.lastTimeSpeed = time.Now()
 	t.updateRA()
 }
@@ -295,6 +304,7 @@ func (t *Torrent) Close() bool {
 		return false
 	}
 	t.Stat = state.TorrentClosed
+	forgetTorrent(t.Hash().HexString())
 
 	if t.bt != nil {
 		t.bt.mu.Lock()

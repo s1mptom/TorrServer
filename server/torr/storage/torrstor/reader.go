@@ -164,7 +164,7 @@ func (r *Reader) trackPosition(n int) {
 	now := time.Now()
 	// Written from the reading goroutine and read from three others — the torrent status, the
 	// cache state and the saving ticker. A time.Time is several words, so an unguarded read
-	// can come out torn, and SessionSeconds gates both the saving and the anti-overshoot
+	// can come out torn, and the session length gates both the saving and the anti-overshoot
 	// ceiling.
 	r.posMu.Lock()
 	defer r.posMu.Unlock()
@@ -174,13 +174,6 @@ func (r *Reader) trackPosition(n int) {
 		r.firstRead = now
 	}
 	r.lastRead = now
-}
-
-// Anchor is the offset where playback started (client's Range target), and whether it is known.
-func (r *Reader) Anchor() (int64, bool) {
-	r.posMu.Lock()
-	defer r.posMu.Unlock()
-	return r.anchor, r.anchorSet
 }
 
 // File is what this reader streams.
@@ -207,10 +200,6 @@ const (
 	// The distinction that does hold is size. A header read is under a megabyte, ffprobe takes
 	// a few; nothing that is actually feeding a player stops this short.
 	handoverMinBytes = 32 << 20
-	// Used if the configured buffer is missing, e.g. in a settings file written before it existed.
-	fallbackBuffer = 32 << 20
-	// Reading to within this margin of the end means the file was watched to the end.
-	eofMargin = 8 << 20
 )
 
 // trackShown moves the picture on by however much the last read allows. The reasoning lives
@@ -288,93 +277,55 @@ func (r *Reader) FurthestScreen() (float64, bool) {
 	return r.cache.FurthestScreen(r.file.Path())
 }
 
-// HeldSeconds is how much film the client is holding ahead of the picture, and whether that
-// is known.
-func (r *Reader) HeldSeconds() (float64, bool) {
-	if r.TimeIndex() == nil {
-		return 0, false
-	}
+// Playback is what the tracker knows about one connection, read under one lock, so the
+// status poll and the saver take a single consistent snapshot rather than a dozen.
+type Playback struct {
+	Started   bool    // the client has read something, so the anchor is known
+	Anchor    int64   // byte the client began at
+	Head      int64   // byte the reader has handed out up to
+	Screen    int64   // byte the picture is at, never behind the anchor or past the file
+	ScreenSec float64 // the same in film time, when the container carries timestamps
+	HasTime   bool    // ScreenSec and Buffer were measured rather than taken from the settings
+	Held      float64 // film the client holds ahead of the picture, in seconds
+	Buffer    int64   // the same in bytes, or the configured size when it is not measured
+	Session   float64 // seconds this connection has been streaming
+}
+
+// Playback reports where this connection's picture is and what the client holds ahead of it.
+// The head is ahead of the picture by whatever the client keeps buffered; when the container
+// carries timestamps that is a measurement, worked out in film time and converted back
+// through the file's own byte positions. Otherwise it is the configured guess, which is all a
+// file without timestamps allows.
+func (r *Reader) Playback() Playback {
 	r.posMu.Lock()
-	defer r.posMu.Unlock()
-	if !r.pos.set {
-		return 0, false
+	pb := Playback{Started: r.anchorSet, Anchor: r.anchor, Head: r.offset}
+	if r.anchorSet {
+		pb.Session = r.lastRead.Sub(r.firstRead).Seconds()
 	}
-	return r.pos.held(), true
-}
+	if r.index != nil && r.pos.set {
+		pb.ScreenSec, pb.HasTime = r.pos.screenSec, true
+		pb.Held = r.pos.held()
+	}
+	r.posMu.Unlock()
 
-// ClientBuffer is how much the client is holding ahead of the picture, in bytes. When the
-// container carries timestamps this is a measurement, worked out in film time and converted
-// back. Otherwise it is the configured guess, which is all a file without timestamps allows.
-func (r *Reader) ClientBuffer() (int64, bool) {
-	if screen, ok := r.screenFromTime(); ok {
-		return r.offset - screen, true
+	if pb.HasTime {
+		if off, ok := r.index.OffsetAt(pb.ScreenSec); ok {
+			pb.Screen, pb.Buffer = off, pb.Head-off
+		} else {
+			pb.HasTime, pb.Held = false, 0
+		}
 	}
-	buffer := int64(settings.BTsets.BufferSizeMB) * 1024 * 1024
-	if buffer <= 0 {
-		buffer = fallbackBuffer
+	if !pb.HasTime {
+		pb.Buffer = int64(settings.BTsets.BufferSizeMB) << 20
+		pb.Screen = pb.Head - pb.Buffer
 	}
-	return buffer, false
-}
-
-// ScreenTime is where the picture is, in film time.
-func (r *Reader) ScreenTime() (float64, bool) {
-	if r.TimeIndex() == nil {
-		return 0, false
-	}
-	r.posMu.Lock()
-	defer r.posMu.Unlock()
-	return r.pos.screen()
-}
-
-// screenFromTime is the same answer as a byte offset, for the parts that speak in offsets:
-// the cache map, and the gate that tells a viewing session from a probe.
-func (r *Reader) screenFromTime() (int64, bool) {
-	sec, ok := r.ScreenTime()
-	if !ok {
-		return 0, false
-	}
-	return r.TimeIndex().OffsetAt(sec)
-}
-
-// ScreenOffset is the byte the picture is at. It never runs behind where playback started,
-// and reading to within a margin of the end counts as watched to the end.
-func (r *Reader) ScreenOffset() int64 {
-	flen := r.file.Length()
-	anchor, _ := r.Anchor()
-	screen, ok := r.screenFromTime()
-	if !ok {
-		buffer, _ := r.ClientBuffer()
-		screen = r.offset - buffer
-	}
-	if screen < anchor {
-		screen = anchor
-	}
-	// Judged on where the picture is, not on how far reading has got. A client holding a few
-	// hundred megabytes reaches the end of the file minutes before it shows the end of the
-	// film, and marking that as watched throws the real position away. The margin only means
-	// anything for a file longer than itself.
-	if flen > eofMargin && screen >= flen-eofMargin {
-		screen = flen
-	}
-	if screen > flen {
-		screen = flen
-	}
-	return screen
+	pb.Screen = min(max(pb.Screen, pb.Anchor), r.file.Length())
+	return pb
 }
 
 // getScreenPiece is the piece the picture is in, as opposed to the one being read.
 func (r *Reader) getScreenPiece() int {
-	return r.getPieceNum(r.ScreenOffset())
-}
-
-// SessionSeconds is how long this reader has actually been streaming.
-func (r *Reader) SessionSeconds() float64 {
-	r.posMu.Lock()
-	defer r.posMu.Unlock()
-	if !r.anchorSet {
-		return 0
-	}
-	return r.lastRead.Sub(r.firstRead).Seconds()
+	return r.getPieceNum(r.Playback().Screen)
 }
 
 func (r *Reader) SetReadahead(length int64) {

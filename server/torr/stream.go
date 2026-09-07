@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -123,26 +124,12 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 	defer close(stopSaving) // registered after CloseReader, so the ticker stops first
 	if !isProbe && positionSavingEnabled() {
 		go func() {
-			// Two periods, one ticker. The reckoning has to be turned over far more often
-			// than the position is written out: what it is watching for is the client going
-			// quiet, and that is only visible to something that keeps looking after the
-			// reads have stopped.
-			// Without timestamps to read there is no reckoning to turn over, only the save.
-			interval := saveInterval
-			if reader.TimeIndex() != nil {
-				interval = trackInterval
-			}
-			ticker := time.NewTicker(interval)
+			ticker := time.NewTicker(saveInterval)
 			defer ticker.Stop()
-			lastSave := time.Now()
 			for {
 				select {
 				case <-ticker.C:
-					reader.Tick()
-					if time.Since(lastSave) >= saveInterval {
-						lastSave = time.Now()
-						saveViewedPosition(t, fileID, file, reader, time.Since(streamStart))
-					}
+					saveViewedPosition(t, fileID, file, reader, time.Since(streamStart))
 				case <-stopSaving:
 					return
 				}
@@ -217,10 +204,10 @@ const (
 	minSessionSeconds = 20
 	// How often the position is refreshed while a stream is still running.
 	saveInterval = 30 * time.Second
-	// How often the reckoning is turned over when the client is not reading. It has to be
-	// well under the quiet a file's own timestamps allow between arrivals, or the silence
-	// that means a stopped client is never seen for what it is.
-	trackInterval = 2 * time.Second
+	// Within this much of the end the film counts as watched to the end, and the position
+	// is stored as the duration rather than as a point just short of it, so the film is not
+	// offered to be resumed at its credits.
+	endMargin = 15.0
 )
 
 // probeMarker is a query flag added to the URL ffprobe is pointed at. A stream carrying
@@ -252,6 +239,18 @@ const probeRetryDelay = 10 * time.Minute
 
 func fileKey(hash string, fileID int) string {
 	return hash + ":" + strconv.Itoa(fileID)
+}
+
+// forgetTorrent drops what was remembered about a torrent's files once it is closed.
+func forgetTorrent(hash string) {
+	for _, m := range []*sync.Map{&durations, &lastSaved} {
+		m.Range(func(k, _ any) bool {
+			if key, ok := k.(string); ok && strings.HasPrefix(key, hash+":") {
+				m.Delete(k)
+			}
+			return true
+		})
+	}
 }
 
 // probeLink is the local stream URL ffprobe reads a file through. It carries the marker that
@@ -345,7 +344,7 @@ const safetyMargin = 10
 // Whichever source is used, the answer is capped by the clock: the picture cannot have moved
 // further than real time has since this session started reading. An estimate that claims
 // otherwise is wrong in the one direction that matters, skipping past unwatched picture.
-func playbackTime(reader *torrstor.Reader, hash string, fileID int) (float64, string) {
+func playbackTime(reader *torrstor.Reader, pb torrstor.Playback, hash string, fileID int) (float64, string) {
 	file := reader.File()
 	if file == nil {
 		return 0, ""
@@ -356,39 +355,33 @@ func playbackTime(reader *torrstor.Reader, hash string, fileID int) (float64, st
 	index.SetOrigin(start)
 	index.SetDuration(dur)
 
-	if flen > 0 && reader.ScreenOffset() >= flen { // watched to the end
-		return dur, index.Source()
-	}
-
 	var sec float64
 	var source string
-	switch v, ok := reader.ScreenTime(); {
-	case ok:
+	switch {
+	case pb.HasTime:
 		// A few seconds are taken off. The reckoning is bounded but not exact — timestamps
 		// arrive a cluster apart and the position is read between them — and measured against
 		// a real player it has come out a fraction of a second past the picture. Landing
 		// short replays a moment; landing past skips it unseen, and there is no reason to
 		// leave that possible for the sake of three tenths of a second.
-		sec, source = v-safetyMargin, index.Source()
+		sec, source = pb.ScreenSec-safetyMargin, index.Source()
 	case dur > 0 && flen > 0:
 		// No timestamps in this container: fall back to the average bitrate, which is a
 		// guess, so it is deliberately reported early.
-		sec, source = float64(reader.ScreenOffset())/float64(flen)*dur-linearMargin, "estimate"
+		sec, source = float64(pb.Screen)/float64(flen)*dur-linearMargin, "estimate"
 	default:
 		return 0, ""
 	}
 
-	if anchor, ok := reader.Anchor(); ok {
-		// The first timestamp at or after the anchor. Asking for the one before it would
-		// reach back to the file header, which another connection indexed at time zero, and
-		// the ceiling would then clamp every position to the length of the session.
-		began, known := index.TimeFrom(anchor)
-		if !known && dur > 0 && flen > 0 {
-			began, known = float64(anchor)/float64(flen)*dur, true
-		}
-		if ceiling := began + reader.SessionSeconds(); known && sec > ceiling {
-			sec = ceiling
-		}
+	// The first timestamp at or after the anchor. Asking for the one before it would reach
+	// back to the file header, which another connection indexed at time zero, and the
+	// ceiling would then clamp every position to the length of the session.
+	began, known := index.TimeFrom(pb.Anchor)
+	if !known && dur > 0 && flen > 0 {
+		began, known = float64(pb.Anchor)/float64(flen)*dur, true
+	}
+	if ceiling := began + pb.Session; known && sec > ceiling {
+		sec = ceiling
 	}
 
 	// Whatever this session reckons on its own, the picture cannot have got further than an
@@ -401,8 +394,8 @@ func playbackTime(reader *torrstor.Reader, hash string, fileID int) (float64, st
 	if sec < 0 {
 		sec = 0
 	}
-	if dur > 0 && sec > dur {
-		sec = dur
+	if dur > 0 && sec > dur-endMargin {
+		sec = dur // watched to the end
 	}
 	return sec, source
 }
@@ -411,97 +404,81 @@ func playbackTime(reader *torrstor.Reader, hash string, fileID int) (float64, st
 // arithmetic the saver uses, so what is on screen in the web interface is what would be
 // stored. Duration is only filled in when it is already known: probing is the saver's job.
 func PlaybackState(hash string, fileID int, reader *torrstor.Reader) *state.PlaybackStatus {
-	file := reader.File()
-	if file == nil {
+	if reader.File() == nil {
 		return nil
 	}
-	if _, ok := reader.Anchor(); !ok {
+	pb := reader.Playback()
+	if !pb.Started {
 		return nil
 	}
-	buffer, measured := reader.ClientBuffer()
-	head := reader.Offset()
-
-	pb := &state.PlaybackStatus{
+	st := &state.PlaybackStatus{
 		FileIndex:      fileID,
-		Head:           head,
-		Buffer:         buffer,
-		BufferMeasured: measured,
-		SessionSeconds: reader.SessionSeconds(),
-		Position:       reader.ScreenOffset(),
-	}
-	if held, ok := reader.HeldSeconds(); ok {
-		pb.BufferSeconds = held
+		Head:           pb.Head,
+		Buffer:         pb.Buffer,
+		BufferMeasured: pb.HasTime,
+		BufferSeconds:  pb.Held,
+		SessionSeconds: pb.Session,
+		Viewing:        isViewing(pb, pb.Session),
+		Position:       pb.Screen,
 	}
 	if dur := getDuration(hash, fileID); dur > 0 {
-		pb.Duration = dur
-		pb.TimeCode, pb.Source = playbackTime(reader, hash, fileID)
+		st.Duration = dur
+		st.TimeCode, st.Source = playbackTime(reader, pb, hash, fileID)
 	}
-	return pb
+	return st
 }
 
 // screenMoved is how far the picture has travelled from where this session began, in bytes.
 // Zero means nothing has been shown yet and there is nothing worth storing.
-func screenMoved(reader *torrstor.Reader) int64 {
-	anchor, ok := reader.Anchor()
-	if !ok {
-		return 0
-	}
-	held, measured := reader.ClientBuffer()
-	if !measured {
+func screenMoved(pb torrstor.Playback) int64 {
+	if !pb.HasTime {
 		// Without a measurement the buffer is a guess from the settings, and the old rule is
 		// the only one available: the session has to have outrun it.
-		return reader.Offset() - anchor - held
+		return pb.Head - pb.Anchor - pb.Buffer
 	}
-	return reader.ScreenOffset() - anchor
+	return pb.Screen - pb.Anchor
+}
+
+// isViewing tells a viewing session from a probe or a metadata preload: it has streamed for
+// a while, and its picture has moved past the byte it started on.
+//
+// The second half used to ask for a whole buffer's worth beyond the anchor, on the grounds
+// that a real session plays past everything it buffered. On a high bitrate that is a matter
+// of seconds; on a low one it is not. A cartoon episode at four megabits holds three hundred
+// megabytes as ten minutes of film, so nothing was stored — and no duration probed — until
+// ten minutes of a twenty-two minute episode had gone by. Half the episode had no resume
+// point at all. What the condition was really guarding against is a client that has not
+// played anything yet, and the picture, worked out from the file's own timestamps, can
+// simply be asked whether it has moved.
+func isViewing(pb torrstor.Playback, active float64) bool {
+	return active >= minSessionSeconds && screenMoved(pb) > 0
 }
 
 // saveViewedPosition stores where playback actually was: the read head minus the client's
 // buffer, converted to seconds using the real media duration. held is how long the client
 // has kept this stream open, which is what separates a viewing session from a quick probe.
 func saveViewedPosition(t *Torrent, fileID int, file *torrent.File, reader *torrstor.Reader, held time.Duration) {
-	flen := file.Length()
-	if _, ok := reader.Anchor(); flen <= 0 || !ok {
+	pb := reader.Playback()
+	if file.Length() <= 0 || !pb.Started {
 		return
 	}
 	hash := t.Hash().HexString()
 
-	buffer, _ := reader.ClientBuffer()
-	head := reader.Offset() // last byte handed to the client = what is on screen + its buffer
-	// Ignore probes and metadata preloads: a real session pulls data over a stretch of time
-	// and plays past everything it buffered. Two independent time signals are used because
-	// either one alone can be misleading: how long the client held the stream depends on TCP
-	// back pressure, while the span of actual reads depends on how fast the torrent supplies.
-	active := reader.SessionSeconds()
-	if held.Seconds() > active {
-		active = held.Seconds()
-	}
-	// Long enough to be a viewing session rather than a probe, and far enough past the byte it
-	// started on to have shown something.
-	//
-	// The second half used to ask for a whole buffer's worth beyond the anchor, on the grounds
-	// that a real session plays past everything it buffered. On a high bitrate that is a matter
-	// of seconds; on a low one it is not. A cartoon episode at four megabits holds three
-	// hundred megabytes as ten minutes of film, so nothing was stored — and no duration probed,
-	// and no drift checked — until ten minutes of a twenty-two minute episode had gone by. Half
-	// the episode had no resume point at all.
-	//
-	// What the condition was really guarding against is a client that has not played anything
-	// yet, and that is answered directly now: the picture is worked out from the file's own
-	// timestamps, so it can simply be asked whether it has moved.
-	if active < minSessionSeconds || screenMoved(reader) <= 0 {
+	// Two independent time signals, the larger taken, because either one alone can mislead:
+	// how long the client held the stream depends on TCP back pressure, while the span of
+	// actual reads depends on how fast the torrent supplies.
+	if !isViewing(pb, max(pb.Session, held.Seconds())) {
 		return
 	}
-
-	screen := reader.ScreenOffset()
 
 	// Nothing new to store (e.g. the stream is paused and the position is unchanged).
 	key := fileKey(hash, fileID)
 	if prev, ok := lastSaved.Load(key); ok {
-		if off, ok := prev.(int64); ok && off == screen {
+		if off, ok := prev.(int64); ok && off == pb.Screen {
 			return
 		}
 	}
-	lastSaved.Store(key, screen)
+	lastSaved.Store(key, pb.Screen)
 
 	// The gates above are passed only by a genuine viewing session, so the duration is
 	// looked up (and probed, if still unknown) at most once per watched file. Done in the
@@ -515,22 +492,15 @@ func saveViewedPosition(t *Torrent, fileID int, file *torrent.File, reader *torr
 		if dur <= 0 { // no real duration => the position cannot be expressed in seconds
 			return
 		}
-		timecode, _ := playbackTime(reader, hash, fileID)
-		sets.SetViewed(&sets.Viewed{
-			Hash:      hash,
-			FileIndex: fileID,
-			TimeCode:  timecode,
-			Offset:    screen,
-			Length:    flen,
-			Duration:  dur,
-		})
-		held, measuredBuffer := reader.HeldSeconds()
-		how := fmt.Sprintf("%dMB from the average bitrate", buffer>>20)
-		if measuredBuffer {
-			how = fmt.Sprintf("%dMB / %.0fs measured", buffer>>20, held)
+		pb := reader.Playback() // the probe may have taken a while; store where it is now
+		timecode, _ := playbackTime(reader, pb, hash, fileID)
+		sets.SetViewed(&sets.Viewed{Hash: hash, FileIndex: fileID, TimeCode: timecode, Duration: dur})
+		how := fmt.Sprintf("%dMB from the average bitrate", pb.Buffer>>20)
+		if pb.HasTime {
+			how = fmt.Sprintf("%dMB / %.0fs measured", pb.Buffer>>20, pb.Held)
 		}
 		log.Printf("[Position] %s:%d saved %.0fs of %.0fs (head %dMB, buffer %s)",
-			hash[:8], fileID, timecode, dur, head>>20, how)
+			hash[:8], fileID, timecode, dur, pb.Head>>20, how)
 	}()
 }
 
