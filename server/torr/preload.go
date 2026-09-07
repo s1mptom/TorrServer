@@ -3,7 +3,6 @@ package torr
 import (
 	"fmt"
 	"io"
-	"strconv"
 	"sync"
 	"time"
 
@@ -105,14 +104,7 @@ func (t *Torrent) Preload(index int, size int64) {
 	}(logStopChan)
 
 	if ffprobe.Exists() {
-		link := "http://127.0.0.1:" + settings.Port + "/play/" + t.Hash().HexString() + "/" + strconv.Itoa(index)
-		if settings.Ssl {
-			link = "https://127.0.0.1:" + settings.SslPort + "/play/" + t.Hash().HexString() + "/" + strconv.Itoa(index)
-		}
-		// Carrying the marker, so this stream is recognised as a probe. Without it the probe
-		// counts as a viewing session: it starts the position ticker and saves on close, and
-		// what it saves is near the start of the file — over the real resume point.
-		if data, err := ffprobe.ProbeUrl(link + "?" + probeMarker + "=1"); err == nil {
+		if data, err := ffprobe.ProbeUrl(probeLink(t.Hash().HexString(), index)); err == nil {
 			t.BitRate = data.Format.BitRate
 			t.DurationSeconds = data.Format.DurationSeconds
 			// reuse it for saving playback position, so that never needs its own probe

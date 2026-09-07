@@ -50,6 +50,15 @@ func run(t testing.TB, name string, args ...string) string {
 	return string(out)
 }
 
+// feedChunks streams data into the feeder from the given offset, 64 KB at a time, the way a
+// player's reads arrive.
+func feedChunks(feeder *Feeder, data []byte, from int) {
+	const chunk = 64 << 10
+	for at := from; at < len(data); at += chunk {
+		feeder.Feed(int64(at), data[at:min(at+chunk, len(data))])
+	}
+}
+
 type truth struct {
 	sec float64
 	pos int64
@@ -120,14 +129,7 @@ func TestIndexReadsTimeFromTheStream(t *testing.T) {
 			feeder := ix.Feeder()
 
 			// Fed the way a player reads it: in chunks, from the beginning.
-			const chunk = 64 << 10
-			for at := 0; at < len(data); at += chunk {
-				end := at + chunk
-				if end > len(data) {
-					end = len(data)
-				}
-				feeder.Feed(int64(at), data[at:end])
-			}
+			feedChunks(feeder, data, 0)
 
 			duration := packets[len(packets)-1].sec
 			var worst, worstLinear float64
@@ -179,14 +181,7 @@ func TestIndexSurvivesASeek(t *testing.T) {
 	feeder.Feed(0, data[:256<<10]) // the header read
 
 	seek := len(data) / 2
-	const chunk = 64 << 10
-	for at := seek; at < len(data); at += chunk {
-		end := at + chunk
-		if end > len(data) {
-			end = len(data)
-		}
-		feeder.Feed(int64(at), data[at:end])
-	}
+	feedChunks(feeder, data, seek)
 
 	found := 0
 	for _, p := range packets {
@@ -230,14 +225,7 @@ func TestStrayHeaderInFrameData(t *testing.T) {
 
 	ix := New(path)
 	feeder := ix.Feeder()
-	const chunk = 64 << 10
-	for off := 0; off < len(data); off += chunk {
-		end := off + chunk
-		if end > len(data) {
-			end = len(data)
-		}
-		feeder.Feed(int64(off), data[off:end])
-	}
+	feedChunks(feeder, data, 0)
 
 	for _, p := range packets {
 		if p.pos < int64(at) {
@@ -302,7 +290,7 @@ func TestTwoStreamsOnOneFile(t *testing.T) {
 			worst = behind
 		}
 	}
-	_, _, count := ix.Span()
+	count := len(ix.samples)
 	if worst > 5.5 {
 		t.Fatalf("worst lag %.1fs across the file, from %d timestamps — clusters are being dropped", worst, count)
 	}
@@ -330,14 +318,7 @@ func TestStrayScaleInFrameData(t *testing.T) {
 	ix := New(path)
 	ix.SetDuration(packets[len(packets)-1].sec)
 	feeder := ix.Feeder()
-	const chunk = 64 << 10
-	for at := 0; at < len(data); at += chunk {
-		end := at + chunk
-		if end > len(data) {
-			end = len(data)
-		}
-		feeder.Feed(int64(at), data[at:end])
-	}
+	feedChunks(feeder, data, 0)
 
 	for _, p := range packets {
 		got, ok := ix.TimeAt(p.pos)

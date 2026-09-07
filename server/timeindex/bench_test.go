@@ -43,14 +43,7 @@ func BenchmarkFeedRealFiles(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				feeder := New(name).Feeder()
-				const chunk = 64 << 10
-				for at := 0; at < len(data); at += chunk {
-					end := at + chunk
-					if end > len(data) {
-						end = len(data)
-					}
-					feeder.Feed(int64(at), data[at:end])
-				}
+				feedChunks(feeder, data, 0)
 			}
 		})
 	}

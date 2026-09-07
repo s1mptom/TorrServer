@@ -127,7 +127,12 @@ func (t *Torrent) Stream(fileID int, req *http.Request, resp http.ResponseWriter
 			// than the position is written out: what it is watching for is the client going
 			// quiet, and that is only visible to something that keeps looking after the
 			// reads have stopped.
-			ticker := time.NewTicker(trackInterval)
+			// Without timestamps to read there is no reckoning to turn over, only the save.
+			interval := saveInterval
+			if reader.TimeIndex() != nil {
+				interval = trackInterval
+			}
+			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			lastSave := time.Now()
 			for {
@@ -249,6 +254,17 @@ func fileKey(hash string, fileID int) string {
 	return hash + ":" + strconv.Itoa(fileID)
 }
 
+// probeLink is the local stream URL ffprobe reads a file through. It carries the marker that
+// tells the stream handler this is a probe, not a viewing session: without it the probe would
+// start the position ticker and save on close, over the real resume point.
+func probeLink(hash string, fileID int) string {
+	link := "http://127.0.0.1:" + sets.Port
+	if sets.Ssl {
+		link = "https://127.0.0.1:" + sets.SslPort
+	}
+	return link + "/play/" + hash + "/" + strconv.Itoa(fileID) + "?" + probeMarker + "=1"
+}
+
 // setDuration records a media duration discovered elsewhere (preload already runs ffprobe).
 func setDuration(hash string, fileID int, seconds float64) {
 	if seconds > 0 {
@@ -297,11 +313,7 @@ func probeDuration(hash string, fileID int) {
 	// for the next ten minutes, and the position for that file goes unsaved meanwhile.
 	durations.Store(key, durEntry{lastTry: time.Now()})
 
-	link := "http://127.0.0.1:" + sets.Port + "/play/" + hash + "/" + strconv.Itoa(fileID)
-	if sets.Ssl {
-		link = "https://127.0.0.1:" + sets.SslPort + "/play/" + hash + "/" + strconv.Itoa(fileID)
-	}
-	data, err := ffprobe.ProbeUrl(link + "?" + probeMarker + "=1")
+	data, err := ffprobe.ProbeUrl(probeLink(hash, fileID))
 	if err != nil || data == nil || data.Format == nil || data.Format.DurationSeconds <= 0 {
 		return // the claimed attempt stands; retried after probeRetryDelay
 	}
@@ -403,18 +415,14 @@ func PlaybackState(hash string, fileID int, reader *torrstor.Reader) *state.Play
 	if file == nil {
 		return nil
 	}
-	anchor, ok := reader.Anchor()
-	if !ok {
+	if _, ok := reader.Anchor(); !ok {
 		return nil
 	}
-	flen := file.Length()
 	buffer, measured := reader.ClientBuffer()
 	head := reader.Offset()
 
 	pb := &state.PlaybackStatus{
 		FileIndex:      fileID,
-		FileLength:     flen,
-		Anchor:         anchor,
 		Head:           head,
 		Buffer:         buffer,
 		BufferMeasured: measured,
@@ -423,12 +431,6 @@ func PlaybackState(hash string, fileID int, reader *torrstor.Reader) *state.Play
 	}
 	if held, ok := reader.HeldSeconds(); ok {
 		pb.BufferSeconds = held
-	}
-	if index := reader.TimeIndex(); index != nil {
-		if sec, ok := index.TimeAt(head); ok {
-			pb.HeadTime = sec
-		}
-		pb.IndexFrom, pb.IndexTo, pb.IndexSamples = index.Span()
 	}
 	if dur := getDuration(hash, fileID); dur > 0 {
 		pb.Duration = dur
@@ -458,11 +460,9 @@ func screenMoved(reader *torrstor.Reader) int64 {
 // has kept this stream open, which is what separates a viewing session from a quick probe.
 func saveViewedPosition(t *Torrent, fileID int, file *torrent.File, reader *torrstor.Reader, held time.Duration) {
 	flen := file.Length()
-	anchor, ok := reader.Anchor()
-	if flen <= 0 || !ok {
+	if _, ok := reader.Anchor(); flen <= 0 || !ok {
 		return
 	}
-	_ = anchor
 	hash := t.Hash().HexString()
 
 	buffer, _ := reader.ClientBuffer()

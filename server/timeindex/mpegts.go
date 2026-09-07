@@ -17,24 +17,17 @@ const (
 )
 
 type mpegts struct {
-	carry   []byte
-	carryAt int64
-	stride  int // 188 or 192, zero until the flavour is known
-	skew    int // bytes before the sync byte inside a packet
+	tail
+	stride int // 188 or 192, zero until the flavour is known
+	skew   int // bytes before the sync byte inside a packet
 }
 
 func newMPEGTS() *mpegts { return &mpegts{} }
 
-func (t *mpegts) name() string { return "mpegts" }
-
-func (t *mpegts) reset() { t.carry = nil }
+func (t *mpegts) reset() { t.drop() }
 
 func (t *mpegts) feed(off int64, p []byte, emit func(int64, float64)) {
-	buf, base := p, off
-	if len(t.carry) > 0 && t.carryAt+int64(len(t.carry)) == off {
-		buf = append(t.carry, p...)
-		base = t.carryAt
-	}
+	buf, base := t.join(off, p)
 
 	start, ok := t.align(buf)
 	if !ok {
@@ -58,19 +51,6 @@ func (t *mpegts) feed(off int64, p []byte, emit func(int64, float64)) {
 		}
 	}
 	t.hold(buf[i:], base+int64(i), tsPacket*2)
-}
-
-// hold keeps the tail that the next call needs to carry on from.
-func (t *mpegts) hold(buf []byte, at int64, max int) {
-	if len(buf) > max {
-		// Adjust the offset before the reslice: afterwards the length is already max and the
-		// correction comes out zero, leaving carryAt pointing at bytes that were dropped. The
-		// carry then never lines up with the following read and is silently discarded.
-		at += int64(len(buf) - max)
-		buf = buf[len(buf)-max:]
-	}
-	t.carry = append(t.carry[:0], buf...)
-	t.carryAt = at
 }
 
 // align finds where a packet starts, and which of the two packet sizes is in use. A single

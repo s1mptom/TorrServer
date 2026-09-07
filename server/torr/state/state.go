@@ -76,8 +76,6 @@ type TorrentStatus struct {
 // number itself or it came from the configured fallback.
 type PlaybackStatus struct {
 	FileIndex      int   `json:"file_index"`
-	FileLength     int64 `json:"file_length,omitempty"`
-	Anchor         int64 `json:"anchor"`
 	Head           int64 `json:"head"`
 	Buffer         int64 `json:"buffer"`
 	BufferMeasured bool  `json:"buffer_measured"`
@@ -91,12 +89,6 @@ type PlaybackStatus struct {
 	// Source is the container the time was read out of, or "estimate" when the file carries
 	// no timestamps and the average bitrate had to be used.
 	Source string `json:"source,omitempty"`
-	// Raw numbers from the index, for working out where an answer went wrong: the film time
-	// it reports at the read head, and how much of the file it has timestamps for.
-	HeadTime     float64 `json:"head_time,omitempty"`
-	IndexFrom    int64   `json:"index_from,omitempty"`
-	IndexTo      int64   `json:"index_to,omitempty"`
-	IndexSamples int     `json:"index_samples,omitempty"`
 }
 
 type TorrentFileStat struct {

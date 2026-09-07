@@ -16,6 +16,9 @@ export const activePlayback = playback =>
 export const playbackPosition = entry =>
   entry?.duration > 0 ? humanizeTime(entry.timecode) : humanizeSize(entry?.position)
 
+// Whether the buffer was measured from the stream or taken from the settings.
+export const bufferMark = (entry, t) => (entry.buffer_measured ? t('BufferMeasuredMark') : t('BufferFallbackMark'))
+
 export default function PlaybackReadout({ playback }) {
   const { t } = useTranslation()
   const entry = activePlayback(playback)
@@ -43,7 +46,7 @@ export default function PlaybackReadout({ playback }) {
         <ReadoutTitle>{t('ClientBuffer')}</ReadoutTitle>
         <ReadoutValue>{humanizeSize(entry.buffer)}</ReadoutValue>
         <ReadoutNote>
-          {entry.buffer_measured ? t('BufferMeasuredMark') : t('BufferFallbackMark')}
+          {bufferMark(entry, t)}
           {bufferNote && ` · ${bufferNote}`}
         </ReadoutNote>
       </ReadoutField>

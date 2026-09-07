@@ -30,53 +30,38 @@ var (
 )
 
 type avi struct {
-	carry   []byte
-	carryAt int64
+	tail
+	index   collector // the idx1 chunk being collected until it is complete
 	fps     float64
 	movi    int64 // where the movi four-character code sits, which the index counts from
 	video   [2]byte
 	haveVid bool
 	streams int
-	pending []byte
-	pendAt  int64
-	pendLen int64
 	done    bool
 }
 
 func newAVI() *avi { return &avi{video: [2]byte{'0', '0'}} }
 
-func (a *avi) name() string { return "avi" }
-
 func (a *avi) reset() {
-	a.carry = nil
-	a.pending = nil
-	a.pendLen = 0
+	a.drop()
+	a.index.reset()
 }
 
 func (a *avi) feed(off int64, p []byte, emit func(int64, float64)) {
-	if a.pendLen > 0 {
-		want := a.pendLen - int64(len(a.pending))
-		take := int64(len(p))
-		if take > want {
-			take = want
-		}
-		a.pending = append(a.pending, p[:take]...)
-		if int64(len(a.pending)) < a.pendLen {
+	if a.index.collecting() {
+		n, done := a.index.take(p)
+		if !done {
 			return
 		}
-		a.readIndex(a.pending, emit)
-		a.pending, a.pendLen = nil, 0
-		off, p = off+take, p[take:]
+		idx, _ := a.index.finish()
+		a.readIndex(idx, emit)
+		off, p = off+int64(n), p[n:]
 		if len(p) == 0 {
 			return
 		}
 	}
 
-	buf, base := p, off
-	if len(a.carry) > 0 && a.carryAt+int64(len(a.carry)) == off {
-		buf = append(a.carry, p...)
-		base = a.carryAt
-	}
+	buf, base := a.join(off, p)
 
 	a.readHeaders(buf, base)
 
@@ -88,21 +73,15 @@ func (a *avi) feed(off int64, p []byte, emit func(int64, float64)) {
 				if int64(len(body)) >= size {
 					a.readIndex(body[:size], emit)
 				} else {
-					a.pendAt, a.pendLen = base+int64(hit+8), size
-					a.pending = append([]byte(nil), body...)
-					a.carry = nil
+					a.index.start(base+int64(hit+8), body, size)
+					a.drop()
 					return
 				}
 			}
 		}
 	}
 
-	keep := aviTail
-	if len(buf) < keep {
-		keep = len(buf)
-	}
-	a.carry = append(a.carry[:0], buf[len(buf)-keep:]...)
-	a.carryAt = base + int64(len(buf)-keep)
+	a.hold(buf, base, aviTail)
 }
 
 // readHeaders picks up the frame rate, which stream carries the picture, and where the movi

@@ -14,33 +14,26 @@ const (
 )
 
 type flv struct {
-	carry   []byte
-	carryAt int64
-	locked  bool
-	next    int64 // file offset the following tag starts at
+	tail
+	locked bool
+	next   int64 // file offset the following tag starts at
 }
 
 func newFLV() *flv { return &flv{} }
 
-func (f *flv) name() string { return "flv" }
-
 func (f *flv) reset() {
-	f.carry = nil
+	f.drop()
 	f.locked = false
 }
 
 func (f *flv) feed(off int64, p []byte, emit func(int64, float64)) {
-	buf, base := p, off
-	if len(f.carry) > 0 && f.carryAt+int64(len(f.carry)) == off {
-		buf = append(f.carry, p...)
-		base = f.carryAt
-	}
+	buf, base := f.join(off, p)
 
 	i := 0
 	if !f.locked {
 		start, ok := f.align(buf, base)
 		if !ok {
-			f.hold(buf, base)
+			f.hold(buf, base, flvTail)
 			return
 		}
 		i = start
@@ -48,7 +41,7 @@ func (f *flv) feed(off int64, p []byte, emit func(int64, float64)) {
 		i = int(f.next - base)
 	} else {
 		f.locked = false
-		f.hold(buf, base)
+		f.hold(buf, base, flvTail)
 		return
 	}
 
@@ -66,16 +59,8 @@ func (f *flv) feed(off int64, p []byte, emit func(int64, float64)) {
 	if f.locked {
 		f.next = base + int64(i)
 	}
-	f.hold(buf[min(i, len(buf)):], base+int64(min(i, len(buf))))
-}
-
-func (f *flv) hold(buf []byte, at int64) {
-	if len(buf) > flvTail {
-		at += int64(len(buf) - flvTail)
-		buf = buf[len(buf)-flvTail:]
-	}
-	f.carry = append(f.carry[:0], buf...)
-	f.carryAt = at
+	i = min(i, len(buf))
+	f.hold(buf[i:], base+int64(i), flvTail)
 }
 
 // align looks for a run of tags that chain into one another, which a coincidence in the
@@ -129,11 +114,4 @@ func flvTag(p []byte) (size int, sec float64, ok bool) {
 	}
 	ms := int64(p[7])<<24 | int64(p[4])<<16 | int64(p[5])<<8 | int64(p[6])
 	return flvTagHeader + body + 4, float64(ms) / 1000, true
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

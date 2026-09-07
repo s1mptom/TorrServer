@@ -26,8 +26,7 @@ var (
 )
 
 type matroska struct {
-	carry     []byte
-	carryAt   int64
+	tail
 	scale     int64 // nanoseconds per timestamp tick
 	scaleRead bool  // taken from the file, whatever the value turned out to be
 
@@ -46,21 +45,15 @@ type matroska struct {
 
 func newMatroska() *matroska { return &matroska{scale: defaultScale} }
 
-func (m *matroska) name() string { return "matroska" }
-
 func (m *matroska) reset() {
-	m.carry = nil
+	m.drop()
 	m.pending = false
 	m.locked = false
 	m.next = 0
 }
 
 func (m *matroska) feed(off int64, p []byte, emit func(int64, float64)) {
-	buf, base := p, off
-	if len(m.carry) > 0 && m.carryAt+int64(len(m.carry)) == off {
-		buf = append(m.carry, p...)
-		base = m.carryAt
-	}
+	buf, base := m.join(off, p)
 
 	// TimestampScale lives in the segment header, at the very front of the file. Looking for
 	// it anywhere else means matching three bytes against picture data, and a match there
@@ -121,12 +114,7 @@ func (m *matroska) feed(off int64, p []byte, emit func(int64, float64)) {
 		m.pendOff, m.pendSec, m.next, m.pending = off, sec, end, true
 	}
 
-	keep := clusterTail
-	if len(buf) < keep {
-		keep = len(buf)
-	}
-	m.carry = append(m.carry[:0], buf[len(buf)-keep:]...)
-	m.carryAt = base + int64(len(buf)-keep)
+	m.hold(buf, base, clusterTail)
 }
 
 // readScale picks up TimestampScale if the segment header happens to go past. Without it the

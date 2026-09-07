@@ -189,11 +189,8 @@ func (r *Reader) File() *torrent.File {
 }
 
 // TimeIndex turns byte offsets in this file into playback time. It is nil for containers
-// that carry no timestamps, and while the feature is switched off.
+// that carry no timestamps, and when the feature was switched off as the reader opened.
 func (r *Reader) TimeIndex() *timeindex.Index {
-	if !settings.BTsets.SmartTimecode {
-		return nil
-	}
 	return r.index
 }
 
@@ -240,7 +237,9 @@ func (r *Reader) trackShown() {
 		if !ok {
 			off = r.anchor
 		}
-		held, box := r.inherited(index, off)
+		// What the client was already holding when this connection opened, from what the
+		// previous connection to the same file left behind.
+		held, box, _ := r.cache.takeOver(r.file.Path(), off)
 		r.pos.start(sec, off, r.firstRead, held, box, index)
 	}
 	if now.Sub(r.pos.at) < time.Second {
@@ -265,7 +264,7 @@ func (r *Reader) trackShown() {
 	// nobody's buffer in particular.
 	if r.offset-r.anchor >= handoverMinBytes {
 		sec, _ := r.pos.screen()
-		r.cache.noteRead(r.file.Path(), r.id, r.offset, r.pos.handOn(), r.pos.box(), r.pos.pictureAt(), sec)
+		r.cache.noteRead(r.file.Path(), r.id, r.pos.handOn(), r.pos.box(), r.pos.pictureAt(), sec)
 	}
 }
 
@@ -280,13 +279,6 @@ func (r *Reader) Tick() {
 		return
 	}
 	r.trackShown()
-}
-
-// inherited is what the client was already holding when this connection opened, in film
-// seconds, taken from what the previous connection to the same file left behind.
-func (r *Reader) inherited(_ *timeindex.Index, startOff int64) (int64, int64) {
-	held, box, _ := r.cache.takeOver(r.file.Path(), startOff)
-	return held, box
 }
 
 // FurthestScreen is the furthest the picture can have reached, going by where an earlier

@@ -32,14 +32,7 @@ func TestStrayTimestampScaleInFrameData(t *testing.T) {
 
 	ix := New(path)
 	feeder := ix.Feeder()
-	const chunk = 64 << 10
-	for off := 0; off < len(data); off += chunk {
-		end := off + chunk
-		if end > len(data) {
-			end = len(data)
-		}
-		feeder.Feed(int64(off), data[off:end])
-	}
+	feedChunks(feeder, data, 0)
 
 	for _, p := range packets {
 		if p.pos < int64(at) {

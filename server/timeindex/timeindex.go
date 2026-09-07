@@ -35,8 +35,75 @@ type parser interface {
 	feed(off int64, p []byte, emit func(off int64, sec float64))
 	// reset drops any partial state, because the stream jumped to an unrelated offset.
 	reset()
-	name() string
 }
+
+// tail is what a parser keeps between reads: the last few bytes of the previous one, so an
+// element split across two reads is still seen whole.
+type tail struct {
+	carry   []byte
+	carryAt int64
+	scratch []byte
+}
+
+// join prepends the carry to p when the two are contiguous, and says where the result
+// starts in the file. The joined buffer lives in a scratch slice reused across reads, so the
+// join stops allocating once it has grown to the size of a read.
+func (t *tail) join(off int64, p []byte) (buf []byte, base int64) {
+	if len(t.carry) == 0 || t.carryAt+int64(len(t.carry)) != off {
+		return p, off
+	}
+	t.scratch = append(append(t.scratch[:0], t.carry...), p...)
+	return t.scratch, t.carryAt
+}
+
+// hold keeps at most keep bytes from the end of buf for the next read. The offset is
+// adjusted before the reslice: afterwards the length is already keep and the correction
+// comes out zero, leaving carryAt pointing at bytes that were dropped.
+func (t *tail) hold(buf []byte, base int64, keep int) {
+	if len(buf) > keep {
+		base += int64(len(buf) - keep)
+		buf = buf[len(buf)-keep:]
+	}
+	t.carry = append(t.carry[:0], buf...)
+	t.carryAt = base
+}
+
+// drop forgets the carry, for a parser that is now collecting something larger instead.
+func (t *tail) drop() { t.carry = t.carry[:0] }
+
+// collector gathers one element that runs past the end of a read — a box, an index — until
+// it has all of it.
+type collector struct {
+	buf  []byte
+	at   int64
+	want int64
+}
+
+// start begins collecting an element of size bytes at file offset at, of which head has
+// already been read.
+func (c *collector) start(at int64, head []byte, size int64) {
+	c.at, c.want = at, size
+	c.buf = append([]byte(nil), head...)
+}
+
+func (c *collector) collecting() bool { return c.want > 0 }
+
+// take consumes from p what the element still needs, and reports how much that was and
+// whether the element is now complete.
+func (c *collector) take(p []byte) (n int, done bool) {
+	n = min(len(p), int(c.want-int64(len(c.buf))))
+	c.buf = append(c.buf, p[:n]...)
+	return n, int64(len(c.buf)) >= c.want
+}
+
+// finish hands over the collected element and its offset, and stops collecting.
+func (c *collector) finish() ([]byte, int64) {
+	buf, at := c.buf, c.at
+	c.buf, c.want = nil, 0
+	return buf, at
+}
+
+func (c *collector) reset() { c.buf, c.want = nil, 0 }
 
 // Index collects (offset, time) pairs seen in a file and answers questions about offsets.
 // One index belongs to one file and is shared by everything reading it. The zero value is
@@ -48,7 +115,6 @@ type Index struct {
 	samples  []sample
 	origin   float64 // timestamp the container gives to the first frame
 	duration float64 // how long the media runs, zero until known
-	dropped  bool    // samples were thinned, so resolution is coarser than the container's
 }
 
 // Feeder reads one stream into the index. A player opens several connections at once — the
@@ -59,6 +125,7 @@ type Index struct {
 type Feeder struct {
 	index   *Index
 	parser  parser
+	emit    func(off int64, sec float64) // built once: a closure per read would be garbage
 	nextOff int64
 	started bool
 
@@ -85,24 +152,25 @@ func (f *Feeder) First() (float64, bool) {
 // to read, and callers fall back to whatever estimate they have.
 func New(name string) *Index {
 	var build func() parser
+	var source string
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".mkv", ".mka", ".mks", ".webm", ".mk3d":
-		build = func() parser { return newMatroska() }
+		build, source = func() parser { return newMatroska() }, "matroska"
 	case ".ts", ".m2ts", ".mts", ".tsv", ".m2t":
-		build = func() parser { return newMPEGTS() }
+		build, source = func() parser { return newMPEGTS() }, "mpegts"
 	case ".mp4", ".m4v", ".mov", ".m4a", ".qt":
-		build = func() parser { return newMP4() }
+		build, source = func() parser { return newMP4() }, "mp4"
 	case ".vob", ".mpg", ".mpeg", ".mpe", ".m2p", ".ps", ".evo":
-		build = func() parser { return newMPEGPS() }
+		build, source = func() parser { return newMPEGPS() }, "mpegps"
 	case ".flv", ".f4v":
-		build = func() parser { return newFLV() }
+		build, source = func() parser { return newFLV() }, "flv"
 	case ".avi", ".divx":
-		build = func() parser { return newAVI() }
+		build, source = func() parser { return newAVI() }, "avi"
 	}
 	if build == nil {
 		return nil
 	}
-	return &Index{newSeen: build, source: build().name()}
+	return &Index{newSeen: build, source: source}
 }
 
 // Feeder opens a stream of its own into the index.
@@ -110,7 +178,14 @@ func (ix *Index) Feeder() *Feeder {
 	if ix == nil {
 		return nil
 	}
-	return &Feeder{index: ix, parser: ix.newSeen()}
+	f := &Feeder{index: ix, parser: ix.newSeen()}
+	f.emit = func(at int64, sec float64) {
+		if !f.firstOK {
+			f.firstSec, f.firstOK = sec, true
+		}
+		ix.add(at, sec)
+	}
+	return f
 }
 
 // Source names the container the timestamps come from, for display.
@@ -160,12 +235,7 @@ func (f *Feeder) Feed(off int64, p []byte) {
 
 	f.index.mu.Lock()
 	defer f.index.mu.Unlock()
-	f.parser.feed(off, p, func(at int64, sec float64) {
-		if !f.firstOK {
-			f.firstSec, f.firstOK = sec, true
-		}
-		f.index.add(at, sec)
-	})
+	f.parser.feed(off, p, f.emit)
 }
 
 // add files one timestamp, keeping the samples ordered by offset.
@@ -175,6 +245,13 @@ func (ix *Index) add(off int64, sec float64) {
 	}
 	if ix.duration > 0 && sec > ix.origin+ix.duration*1.05 {
 		return // past the end of the media: not a timestamp this file contains
+	}
+	// Within one stream offsets only grow, so nearly every timestamp lands past the end and
+	// the search is skipped for it.
+	if n := len(ix.samples); n == 0 || ix.samples[n-1].off < off && ix.samples[n-1].sec <= sec {
+		ix.samples = append(ix.samples, sample{off: off, sec: sec})
+		ix.thin()
+		return
 	}
 	at := sort.Search(len(ix.samples), func(i int) bool { return ix.samples[i].off >= off })
 	if at < len(ix.samples) && ix.samples[at].off == off {
@@ -192,17 +269,26 @@ func (ix *Index) add(off int64, sec float64) {
 	ix.samples = append(ix.samples, sample{})
 	copy(ix.samples[at+1:], ix.samples[at:])
 	ix.samples[at] = sample{off: off, sec: sec}
+	ix.thin()
+}
 
-	if len(ix.samples) > maxSamples {
-		kept := ix.samples[:0]
-		for i, s := range ix.samples {
-			if i%2 == 0 {
-				kept = append(kept, s)
-			}
-		}
-		ix.samples = kept
-		ix.dropped = true
+// thin halves the index once it is over the cap, keeping the coverage at half the resolution.
+func (ix *Index) thin() {
+	if len(ix.samples) <= maxSamples {
+		return
 	}
+	kept := ix.samples[:0]
+	for i, s := range ix.samples {
+		if i%2 == 0 {
+			kept = append(kept, s)
+		}
+	}
+	ix.samples = kept
+}
+
+// rel turns a container timestamp into playback time, which starts at zero.
+func (ix *Index) rel(sec float64) float64 {
+	return max(sec-ix.origin, 0)
 }
 
 // TimeAt is the playback time at a byte offset, taken from the last timestamp at or before
@@ -218,11 +304,7 @@ func (ix *Index) TimeAt(off int64) (float64, bool) {
 	if at == 0 {
 		return 0, false
 	}
-	sec := ix.samples[at-1].sec - ix.origin
-	if sec < 0 {
-		sec = 0
-	}
-	return sec, true
+	return ix.rel(ix.samples[at-1].sec), true
 }
 
 // TimeBetween is the playback time at a byte offset, read between the timestamps on either
@@ -266,11 +348,7 @@ func (ix *Index) TimeBetween(off int64) (float64, bool) {
 			sec += (before.sec - prev.sec) * float64(off-before.off) / float64(span)
 		}
 	}
-	sec -= ix.origin
-	if sec < 0 {
-		sec = 0
-	}
-	return sec, true
+	return ix.rel(sec), true
 }
 
 // TimeFrom is the playback time at the first timestamp at or after a byte offset. Where
@@ -288,11 +366,7 @@ func (ix *Index) TimeFrom(off int64) (float64, bool) {
 	if at >= len(ix.samples) {
 		return 0, false
 	}
-	sec := ix.samples[at].sec - ix.origin
-	if sec < 0 {
-		sec = 0
-	}
-	return sec, true
+	return ix.rel(ix.samples[at].sec), true
 }
 
 // OffsetAt is where in the file a playback time is found, taken from the last timestamp at
@@ -310,18 +384,4 @@ func (ix *Index) OffsetAt(seconds float64) (int64, bool) {
 		return 0, false
 	}
 	return ix.samples[at-1].off, true
-}
-
-// Span is how much of the file the index covers and how many timestamps it holds, for
-// display and for judging how much to trust a lookup.
-func (ix *Index) Span() (first, last int64, count int) {
-	if ix == nil {
-		return 0, 0, 0
-	}
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	if len(ix.samples) == 0 {
-		return 0, 0, 0
-	}
-	return ix.samples[0].off, ix.samples[len(ix.samples)-1].off, len(ix.samples)
 }

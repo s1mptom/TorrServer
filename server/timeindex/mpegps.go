@@ -15,22 +15,15 @@ const psTail = 64 // enough to hold a packet header split across two reads
 var psPrefix = []byte{0x00, 0x00, 0x01}
 
 type mpegps struct {
-	carry   []byte
-	carryAt int64
+	tail
 }
 
 func newMPEGPS() *mpegps { return &mpegps{} }
 
-func (s *mpegps) name() string { return "mpegps" }
-
-func (s *mpegps) reset() { s.carry = nil }
+func (s *mpegps) reset() { s.drop() }
 
 func (s *mpegps) feed(off int64, p []byte, emit func(int64, float64)) {
-	buf, base := p, off
-	if len(s.carry) > 0 && s.carryAt+int64(len(s.carry)) == off {
-		buf = append(s.carry, p...)
-		base = s.carryAt
-	}
+	buf, base := s.join(off, p)
 
 	for i := 0; ; {
 		hit := bytes.Index(buf[i:], psPrefix)
@@ -44,12 +37,7 @@ func (s *mpegps) feed(off int64, p []byte, emit func(int64, float64)) {
 		i = at + len(psPrefix)
 	}
 
-	keep := psTail
-	if len(buf) < keep {
-		keep = len(buf)
-	}
-	s.carry = append(s.carry[:0], buf[len(buf)-keep:]...)
-	s.carryAt = base + int64(len(buf)-keep)
+	s.hold(buf, base, psTail)
 }
 
 // pesPTS reads the presentation time out of a video packet whose start code has just been

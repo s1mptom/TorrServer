@@ -169,7 +169,6 @@ func (c *Cache) TimeIndex(path string) *timeindex.Index {
 // holding at the time.
 type handover struct {
 	by      int64     // which connection these readings belong to
-	head    int64     // byte offset the last connection reached
 	holding int64     // what the client had in hand there, in bytes
 	size    int64     // and the size of its buffer, which an interruption does not change
 	picture int64     // byte the picture was at, as last reported
@@ -179,7 +178,7 @@ type handover struct {
 
 // noteRead records where a connection has read to, what it was holding, and where the
 // picture was.
-func (c *Cache) noteRead(path string, by, head, holding, size, picture int64, sec float64) {
+func (c *Cache) noteRead(path string, by, holding, size, picture int64, sec float64) {
 	if c == nil {
 		return
 	}
@@ -193,7 +192,7 @@ func (c *Cache) noteRead(path string, by, head, holding, size, picture int64, se
 		h = &handover{}
 		c.handovers[path] = h
 	}
-	h.head, h.at = head, time.Now()
+	h.at = time.Now()
 	// The most it was seen holding, not what it holds at this instant. Handing over the
 	// instant value was tried and reverted: it left the next connection with nothing to
 	// inherit, and a connection that believes the client holds nothing puts the picture at
@@ -231,13 +230,11 @@ func (c *Cache) noteRead(path string, by, head, holding, size, picture int64, se
 // still be taken for the same client coming back. It only has to be wider than the slop
 // between where a player says it resumes and where it actually asks for; a seek is a jump of
 // minutes and lands nowhere near.
-// In bytes, since that is what everything here is kept in. Generous: it only has to cover the
-// slop between where a player says it resumes and where it actually asks for.
 const rejoinMargin = 256 << 20
 
 // takeOver reports how much the client watching this file was last seen holding, so a
-// connection opening now can start from that rather than from nothing. startSec is the film
-// time the new connection begins at.
+// connection opening now can start from that rather than from nothing. startOff is the byte
+// the new connection begins at.
 //
 // Whether the buffer belongs to whoever turned up is decided by where they turned up. A
 // player that lost its connection carries on from somewhere inside what it already had: at
@@ -250,12 +247,6 @@ const rejoinMargin = 256 << 20
 // with nothing whatsoever happening, and the rule meant to catch a client filling from empty
 // fired three times. Every reconnection was therefore refused, and the buffer remeasured from
 // a fill that counted the refilled pipe as the client's own: 37 seconds became 56.
-//
-// The buffer is carried in film time rather than in bytes. Bytes are the truer description of
-// a device, but turning them back into film time has to be done somewhere in the file, and
-// the only offset available is where the new connection began — which need not be where the
-// measurement was taken. Measured that way the carried buffer came out at 450MB against a
-// real 300MB. Seconds need no such conversion.
 func (c *Cache) takeOver(path string, startOff int64) (held, size int64, ok bool) {
 	if c == nil {
 		return 0, 0, false
@@ -273,7 +264,7 @@ func (c *Cache) takeOver(path string, startOff int64) (held, size int64, ok bool
 	// that does.
 	from, to := h.picture-rejoinMargin, h.picture+h.holding+rejoinMargin
 	if startOff < from || startOff > to {
-		log.TLogln("[Handover] starting at", startOff>>20, "MB, outside", maxi(from, 0)>>20, "..", to>>20,
+		log.TLogln("[Handover] starting at", startOff>>20, "MB, outside", max(from, 0)>>20, "..", to>>20,
 			"MB — not the same playback, nothing carried over")
 		return 0, 0, false
 	}

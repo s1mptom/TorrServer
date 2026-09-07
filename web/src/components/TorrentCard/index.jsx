@@ -7,7 +7,7 @@ import {
   Delete as DeleteIcon,
 } from '@material-ui/icons'
 import { getPeerString, humanizeSize, humanizeSpeed, removeRedundantCharacters } from 'utils/Utils'
-import { activePlayback, playbackPosition } from 'components/PlaybackReadout'
+import { activePlayback, bufferMark, playbackPosition } from 'components/PlaybackReadout'
 import { playlistTorrHost, streamHost, torrentsHost } from 'utils/Hosts'
 import { NoImageIcon } from 'icons'
 import DialogTorrentDetailsContent from 'components/DialogTorrentDetailsContent'
@@ -133,29 +133,20 @@ const audioCodecName = track => {
   }
 }
 
-const samePlayback = (left, right) => {
-  const leftPlay = left || []
-  const rightPlay = right || []
+// Two lists are the same when every entry agrees on the given keys, in order.
+const sameList = (left, right, keys) => {
+  const leftList = left || []
+  const rightList = right || []
   return (
-    leftPlay.length === rightPlay.length &&
-    leftPlay.every((entry, index) => {
-      const other = rightPlay[index]
-      return entry.position === other?.position && entry.buffer === other.buffer && entry.head === other.head
-    })
+    leftList.length === rightList.length &&
+    leftList.every((entry, index) => keys.every(key => entry[key] === rightList[index]?.[key]))
   )
 }
 
-const sameFileList = (left, right) => {
-  const leftFiles = left || []
-  const rightFiles = right || []
-  return (
-    leftFiles.length === rightFiles.length &&
-    leftFiles.every((file, index) => {
-      const other = rightFiles[index]
-      return file.id === other?.id && file.path === other.path && file.length === other.length
-    })
-  )
-}
+// Only what the card shows: the read head moves on every read, and comparing it would
+// re-render the card on every poll while a file is streaming.
+const samePlayback = (left, right) => sameList(left, right, ['position', 'timecode', 'buffer', 'buffer_measured'])
+const sameFileList = (left, right) => sameList(left, right, ['id', 'path', 'length'])
 
 const Torrent = ({ torrent }) => {
   const { t } = useTranslation()
@@ -569,7 +560,7 @@ const Torrent = ({ torrent }) => {
             {nowPlaying && (
               <div className='description-playback'>
                 {t('OnScreen')}: {playbackPosition(nowPlaying)} · {humanizeSize(nowPlaying.buffer)}{' '}
-                {nowPlaying.buffer_measured ? t('BufferMeasuredMark') : t('BufferFallbackMark')}
+                {bufferMark(nowPlaying, t)}
               </div>
             )}
           </div>

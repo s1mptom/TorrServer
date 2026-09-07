@@ -318,7 +318,7 @@ func TestAWrongCarryOnlyEverLandsBehind(t *testing.T) {
 func TestHandoverGoesOnlyToTheSamePlayback(t *testing.T) {
 	c := &Cache{handovers: map[string]*handover{}}
 	const path = "film.mkv"
-	c.noteRead(path, 1, 1<<30, 30<<20, 30<<20, 600<<20, 600) // picture at 600s, holding 30s, so served 600..630
+	c.noteRead(path, 1, 30<<20, 30<<20, 600<<20, 600) // picture at 600s, holding 30s, so served 600..630
 
 	for _, tc := range []struct {
 		name  string

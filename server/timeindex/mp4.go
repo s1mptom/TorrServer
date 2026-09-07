@@ -20,48 +20,34 @@ const (
 )
 
 type mp4 struct {
-	carry   []byte
-	carryAt int64
-	pending []byte // a box being collected until it is complete
-	pendAt  int64
-	pendLen int64
-	scale   uint32 // media timescale of the track the offsets belong to
-	table   bool   // the progressive table has been read, nothing more to do
+	tail
+	box   collector // a box being collected until it is complete
+	scale uint32    // media timescale of the track the offsets belong to
+	table bool      // the progressive table has been read, nothing more to do
 }
 
 func newMP4() *mp4 { return &mp4{} }
 
-func (m *mp4) name() string { return "mp4" }
-
 func (m *mp4) reset() {
-	m.carry = nil
-	m.pending = nil
-	m.pendLen = 0
+	m.drop()
+	m.box.reset()
 }
 
 func (m *mp4) feed(off int64, p []byte, emit func(int64, float64)) {
-	if m.pendLen > 0 {
-		want := m.pendLen - int64(len(m.pending))
-		take := int64(len(p))
-		if take > want {
-			take = want
-		}
-		m.pending = append(m.pending, p[:take]...)
-		if int64(len(m.pending)) < m.pendLen {
+	if m.box.collecting() {
+		n, done := m.box.take(p)
+		if !done {
 			return // still filling
 		}
-		m.complete(emit)
-		off, p = off+take, p[take:]
+		box, at := m.box.finish()
+		m.complete(emit, box, at)
+		off, p = off+int64(n), p[n:]
 		if len(p) == 0 {
 			return
 		}
 	}
 
-	buf, base := p, off
-	if len(m.carry) > 0 && m.carryAt+int64(len(m.carry)) == off {
-		buf = append(m.carry, p...)
-		base = m.carryAt
-	}
+	buf, base := m.join(off, p)
 
 	// Every byte of the media data goes through here, so the two box names are looked for
 	// with a pattern search rather than a comparison at every offset.
@@ -80,24 +66,17 @@ func (m *mp4) feed(off int64, p []byte, emit func(int64, float64)) {
 		}
 		start := i - 4
 		if int64(len(buf)-start) >= size {
-			m.pendAt, m.pending, m.pendLen = base+int64(start), buf[start:start+int(size)], size
-			m.complete(emit)
+			m.complete(emit, buf[start:start+int(size)], base+int64(start))
 			i = start + int(size)
 			continue
 		}
 		// The box runs past what has been read; collect the rest as it arrives.
-		m.pendAt, m.pendLen = base+int64(start), size
-		m.pending = append([]byte(nil), buf[start:]...)
-		m.carry = nil
+		m.box.start(base+int64(start), buf[start:], size)
+		m.drop()
 		return
 	}
 
-	keep := mp4BoxTail
-	if len(buf) < keep {
-		keep = len(buf)
-	}
-	m.carry = append(m.carry[:0], buf[len(buf)-keep:]...)
-	m.carryAt = base + int64(len(buf)-keep)
+	m.hold(buf, base, mp4BoxTail)
 }
 
 // nextBox finds the next moov or moof name at or after from, leaving room for the length
@@ -120,10 +99,8 @@ var (
 	boxMoof = []byte("moof")
 )
 
-// complete reads a box that has just been collected in full.
-func (m *mp4) complete(emit func(int64, float64)) {
-	box, at := m.pending, m.pendAt
-	m.pending, m.pendLen = nil, 0
+// complete reads a box that is in hand in full, starting at file offset at.
+func (m *mp4) complete(emit func(int64, float64), box []byte, at int64) {
 	if len(box) < 8 {
 		return
 	}

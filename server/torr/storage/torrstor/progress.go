@@ -63,9 +63,8 @@ type progress struct {
 	// speeds, however small that difference is.
 	played bool
 
-	// How long it has been keeping up without a break, when what the client holds was last seen
-	// to grow by more than a hair, and whether the head has ever stopped at all.
-	keptUp     float64
+	// When what the client holds was last seen to grow by more than a hair, and whether the
+	// head has ever stopped at all.
 	grew       time.Time
 	everSilent bool
 
@@ -112,8 +111,6 @@ const (
 	// The most film a second of reading can plausibly deliver. A jump past this is a
 	// timestamp that does not belong where it was found.
 	maxLeap = 300.0
-	// How long a stretch the fill is judged over, and the rate at which a client is taking no
-	// more than it watches. Both come from measurement.
 	// How long a stretch is judged over, how much the amount in hand may drift in it without
 	// counting as movement, and the band within which a client is taking about what it
 	// watches. The band needs both ends: without a floor, "no faster than it watches" is also
@@ -122,15 +119,7 @@ const (
 	// worst possible moment to decide how much a client holds. Measured on an undisturbed run,
 	// the size settled at 179MB while the client was starving down to 100, and stayed there
 	// after it had recovered to 300.
-	settleFor = 15.0
-	// How long a client must go on taking about what it watches before it is taken to be
-	// watching. Longer than the window the size is settled over, and for a different reason:
-	// the tail of a fill has to pass through one times on its way to nothing, and if the last
-	// megabytes dribble in it can sit there for a while. Measured on a warm-up pause, that tail
-	// held inside the band long enough to be mistaken for playback, and the size was then
-	// settled at half of what the player went on to hold. A tail is over in seconds; watching
-	// goes on for as long as the film does.
-	watchFor   = 45.0
+	settleFor  = 15.0
 	settleSlop = 4 << 20
 	// A client reading without a break for this long cannot be paused: a buffer is finite, so
 	// one that is filling reaches the top and stops. Nothing that goes on taking film for five
@@ -172,7 +161,7 @@ func (p *progress) start(ref float64, refOff int64, at time.Time, holding, size 
 		p.buffer = holding
 		// The floor is the box, not what is left in it: the refill of everything that died
 		// with the line belongs to the client just as much as what survived.
-		p.inherited = maxi(holding, size)
+		p.inherited = max(holding, size)
 		// Settled, and not measured again. A buffer is a fixed number of megabytes set on the
 		// device; a dropped connection does not resize it, and the same client coming back is
 		// holding the same box it was holding before. Re-measuring it on the new connection was
@@ -224,12 +213,12 @@ func (p *progress) step(head float64, off int64, ix film, now time.Time) {
 			if seen := now.Sub(p.arrived).Seconds(); seen > p.gap {
 				p.gap = seen
 			} else {
-				p.gap = maxf(p.gap*0.97, seen)
+				p.gap = max(p.gap*0.97, seen)
 			}
 		}
 		p.arrived = now
 	}
-	quiet := clampf(p.gap*3, minQuiet, maxQuiet)
+	quiet := min(max(p.gap*3, minQuiet), maxQuiet)
 	silent := !p.arrived.IsZero() && now.Sub(p.arrived).Seconds() >= quiet
 
 	// Only while film is coming, and only while the client is taking no more than it watches.
@@ -295,7 +284,6 @@ func (p *progress) step(head float64, off int64, ix film, now time.Time) {
 	// costs.
 	if arrived > 0 && !silent && !p.played && p.keepingUp() {
 		p.played = true
-		p.keptUp = 0
 	}
 	if !p.played && !p.everSilent && now.Sub(p.begun).Seconds() >= watchingAfter {
 		p.played = true
@@ -370,7 +358,7 @@ func (p *progress) step(head float64, off int64, ix film, now time.Time) {
 		p.screenOff = p.refOff
 	}
 	if sec, ok := ix.TimeAt(p.screenOff); ok {
-		p.screenSec = maxf(p.ref, sec)
+		p.screenSec = max(p.ref, sec)
 	}
 
 	p.head, p.off, p.at = head, off, now
@@ -410,15 +398,15 @@ func (p *progress) window(arrived, passed float64) {
 	}
 }
 
-// keepingUp reports whether film has lately been arriving at about the speed it is watched —
-// neither filling nor falling behind. It is the only state in which what the client holds can
-// be read off, because it is the only one in which what it holds is not changing.
 // keepsUp reports whether film is at least arriving as fast as it plays. Below that a client
 // cannot be watching for long, whatever else is true.
 func (p *progress) keepsUp() bool {
 	return p.winPass < settleFor || p.winArr >= p.winPass*keepUpRate
 }
 
+// keepingUp reports whether film has lately been arriving at about the speed it is watched —
+// neither filling nor falling behind. It is the only state in which what the client holds can
+// be read off, because it is the only one in which what it holds is not changing.
 func (p *progress) keepingUp() bool {
 	return p.winPass >= settleFor &&
 		p.winArr >= p.winPass*keepUpRate && p.winArr <= p.winPass*watchRate
@@ -438,7 +426,7 @@ func (p *progress) box() int64 {
 	if !p.set {
 		return 0
 	}
-	return maxi(p.buffer, p.inherited)
+	return max(p.buffer, p.inherited)
 }
 
 // pictureAt is the byte the picture is at, for the connection that comes next.
@@ -452,7 +440,7 @@ func (p *progress) held() float64 {
 	if !p.set {
 		return 0
 	}
-	return maxf(0, p.head-p.screenSec)
+	return max(0, p.head-p.screenSec)
 }
 
 // handOn is the buffer this session may pass to the next one, in bytes. Never more than it was
@@ -465,28 +453,4 @@ func (p *progress) handOn() int64 {
 		return p.inherited
 	}
 	return p.buffer
-}
-
-func maxi(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func maxf(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func clampf(v, lo, hi float64) float64 {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }
